@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-culler"
+version = "0.1.0"
+description = "Headless offline CLI image culling engine with GUI-ready callbacks"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy>=1.24",
+  "Pillow>=10.0",
+  "scikit-learn>=1.3",
+  "onnxruntime>=1.16",
+  "tokenizers>=0.15",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.4",
+]
+
+[project.scripts]
+ai-culler = "aiculler.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

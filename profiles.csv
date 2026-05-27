@@ -1,0 +1,40 @@
+profile,type,weight,prompt
+portrait_bokeh,positive,1.0,sharp eyes
+portrait_bokeh,positive,0.9,shallow depth of field
+portrait_bokeh,positive,0.8,background separation
+portrait_bokeh,positive,0.7,natural skin tones
+portrait_bokeh,positive,0.6,flattering portrait lighting
+portrait_bokeh,negative,0.8,closed eyes
+portrait_bokeh,negative,0.7,motion blur
+portrait_bokeh,negative,0.6,cluttered background
+portrait_bokeh,negative,0.5,harsh flash
+documentary_candid,positive,1.0,candid emotional moment
+documentary_candid,positive,0.8,natural light
+documentary_candid,positive,0.8,authentic expression
+documentary_candid,positive,0.6,storytelling composition
+documentary_candid,negative,0.7,posed stiff expression
+documentary_candid,negative,0.6,motion blur
+documentary_candid,negative,0.5,distracting clutter
+product_clean,positive,1.0,clean product photo
+product_clean,positive,0.8,sharp subject
+product_clean,positive,0.8,clear labels
+product_clean,positive,0.7,clean background
+product_clean,positive,0.6,studio lighting
+product_clean,negative,0.8,blurred product
+product_clean,negative,0.7,cluttered background
+product_clean,negative,0.5,glare reflections
+bar_bottles,positive,1.0,wine bottles
+bar_bottles,positive,1.0,liquor bottles
+bar_bottles,positive,0.9,bottles of alcohol
+bar_bottles,positive,0.8,bar shelf
+bar_bottles,positive,0.8,glass bottles with labels
+bar_bottles,negative,0.5,landscape photography
+bar_bottles,negative,0.5,portrait photo
+bar_bottles,negative,0.4,mountain scenery
+landscape_natural,positive,1.0,beautiful landscape
+landscape_natural,positive,0.8,golden hour light
+landscape_natural,positive,0.8,strong composition
+landscape_natural,positive,0.7,dramatic sky
+landscape_natural,negative,0.8,blown out sky
+landscape_natural,negative,0.6,hazy low contrast
+landscape_natural,negative,0.5,crooked horizon
