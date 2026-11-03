@@ -15,6 +15,7 @@ from typing import Callable
 ProgressCallback = Callable[[str, int, int], None]  # (stage, done, total)
 
 BRACKET_MODES = ("keep_set", "pick_one", "ignore")
+MOVING_BRACKET_MODES = ("as_burst", "bracket")
 SEQUENCE_MODES = ("keep_all", "cull")
 FEATURELESS_MODES = ("review", "reject", "off")
 NORMALISE_MODES = ("relative", "rank", "zscore")
@@ -64,6 +65,11 @@ class GateSettings:
 @dataclass
 class CullSettings:
     brackets: str = "keep_set"  # keep_set | pick_one | ignore
+    # A bracket whose frames don't register (bracketeering: subject or camera moving, e.g. wildlife shot with
+    # auto-bracketing on) is not an HDR set but alternatives of a moment: "as_burst" ranks its frames against each
+    # other like a burst (bursts_keep survive; never gated, clipping still costs a penalty); "bracket" treats it
+    # like any other bracket (the brackets setting).
+    moving_brackets: str = "as_burst"
     bursts_keep: int = 2  # best N frames per burst; 0 = bursts left out of culling (all kept)
     scene_keep: int = 1  # best N units per near-duplicate scene; 0 = scenes not reduced
     focus_stacks: str = "keep_all"  # keep_all | cull
@@ -124,6 +130,7 @@ class CullSettings:
                 raise ValueError(f"{name} must be one of {', '.join(allowed)}; got {value!r}")
 
         check("brackets", self.brackets, BRACKET_MODES)
+        check("moving_brackets", self.moving_brackets, MOVING_BRACKET_MODES)
         check("focus_stacks", self.focus_stacks, SEQUENCE_MODES)
         check("timelapses", self.timelapses, SEQUENCE_MODES)
         check("gates.featureless", self.gates.featureless, FEATURELESS_MODES)

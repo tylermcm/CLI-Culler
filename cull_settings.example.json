@@ -1,5 +1,6 @@
 {
   "brackets": "keep_set",
+  "moving_brackets": "as_burst",
   "bursts_keep": 2,
   "scene_keep": 1,
   "focus_stacks": "keep_all",

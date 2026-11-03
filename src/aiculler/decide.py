@@ -130,13 +130,19 @@ class _State:
 
 
 def penalty_items(shoot: Shoot, scores: dict[str, dict[str, float]], settings: "CullSettings") -> dict[str, list[tuple[str, float, str]]]:
-    """Score penalties per capture: (name, amount, reason). Never on bracket frames."""
+    """Score penalties per capture: (name, amount, reason). Never on bracket frames, except a moving bracket's
+    (``moving_brackets: as_burst``), whose frames are alternatives ranked like a burst's."""
+    from aiculler.routing import ranks_as_burst
+
     out: dict[str, list[tuple[str, float, str]]] = {}
     for cid, values in scores.items():
-        if cid not in shoot.captures or shoot.group_of(cid).kind == "exposure":
+        if cid not in shoot.captures:
+            continue
+        g = shoot.group_of(cid)
+        if g.kind == "exposure" and not ranks_as_burst(g, settings):
             continue
         its = []
-        pen = clip_penalty(values, settings)
+        pen = clip_penalty(values, settings, ungated=g.kind == "exposure")
         if pen > 0:
             its.append(("clip_penalty", pen, f"one clipped region covers {values['clip_region']:.0%} of the frame"))
         closed = values.get("eyes_closed")
@@ -186,7 +192,7 @@ def _name(shoot: Shoot, capture: str) -> str:
 def _unit_label(shoot: Shoot, unit: Unit) -> str:
     if unit.kind == "single":
         return _name(shoot, unit.rep) if unit.rep else unit.id
-    label = {"exposure": "bracket", "burst": "burst", "focus": "focus stack", "timelapse": "timelapse"}[unit.kind]
+    label = unit.label or {"exposure": "bracket", "burst": "burst", "focus": "focus stack", "timelapse": "timelapse"}[unit.kind]
     return f"{label} {unit.id}"
 
 
@@ -294,7 +300,8 @@ def _rank_burst(shoot, b: ComparisonSet, unit: Unit, gates, scores, weights, met
     order = sorted(b.members, key=lambda c: (gates.failed(c), -combined[c], index[c]))
     ok = [c for c in order if not gates.failed(c)]
     unit.rep = ok[0] if ok else order[0]
-    unit.rep_reason = "best frame of the burst" if ok else "least-bad frame of the burst"
+    name = f"{b.label} {b.id}"
+    unit.rep_reason = f"best frame of the {b.label}" if ok else f"least-bad frame of the {b.label}"
     keep = b.keep or len(b.members)
     survivors[b.id] = ok[:keep]
     n = len(b.members)
@@ -303,17 +310,17 @@ def _rank_burst(shoot, b: ComparisonSet, unit: Unit, gates, scores, weights, met
         s_.comparison_set, s_.rank, s_.size, s_.score, s_.rel = b.id, rank, n, combined[c], rel[c]
         if gates.failed(c):
             s_.gate_rejected = True
-            s_.set("reject", "rejected: " + "; ".join(f.reason for f in gates.failures[c]) + f" (burst {b.id})")
+            s_.set("reject", "rejected: " + "; ".join(f.reason for f in gates.failures[c]) + f" ({name})")
         elif c in survivors[b.id]:
             if n <= keep:
-                s_.reasons.append(f"burst of {n}: all frames kept (bursts_keep {keep})")
+                s_.reasons.append(f"{b.label} of {n}: all frames kept (bursts_keep {keep})")
             else:
-                s_.reasons.append(f"rank {ok.index(c) + 1} of {n} in burst {b.id} (keeping {keep})")
+                s_.reasons.append(f"rank {ok.index(c) + 1} of {n} in {name} (keeping {keep})")
         else:
             better = ok.index(c)
             s_.set(
                 "reject",
-                f"rejected: {better} better frame{'s' if better != 1 else ''} in burst {b.id} (keeping {keep}); "
+                f"rejected: {better} better frame{'s' if better != 1 else ''} in {name} (keeping {keep}); "
                 f"{_name(shoot, ok[0])} {_why_better(ok[0], c, rel, pnames)}",
             )
 
@@ -385,6 +392,7 @@ def _rank_scene(shoot, s: ComparisonSet, routing, gates, scores, weights, method
 def _apply(shoot, u: Unit, outcome: str, scene_reason: str, routing: Routing, st, survivors, rescue: bool = False) -> None:
     """Apply a unit's scene outcome to the captures that follow it."""
     if u.kind == "burst":
+        name = f"{u.label or 'burst'} {u.id}"
         followers = [u.rep] if rescue else survivors.get(u.id, [])
         for c in followers:
             if rescue:
@@ -393,9 +401,9 @@ def _apply(shoot, u: Unit, outcome: str, scene_reason: str, routing: Routing, st
                 st[c].reasons = [r for r in st[c].reasons if not r.startswith("rejected:")]
                 st[c].reasons.append(scene_reason)
             elif outcome == "reject":
-                st[c].set("reject", f"rejected: burst {u.id} lost in its scene: " + scene_reason.removeprefix("rejected: "))
+                st[c].set("reject", f"rejected: {name} lost in its scene: " + scene_reason.removeprefix("rejected: "))
             else:
-                st[c].set(outcome, f"burst {u.id}: {scene_reason}")
+                st[c].set(outcome, f"{name}: {scene_reason}")
         return
     if u.kind == "exposure":
         if routing.pick_one:

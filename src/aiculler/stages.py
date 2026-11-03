@@ -102,6 +102,8 @@ def blur_failures(shoot: Shoot, routing: Routing, gates: GateResults, scores, se
     cut = values[max(0, math.ceil(len(values) * g.maniqa_bottom) - 1)]  # the worst ceil(2% of n) frames
     sets: dict[str, list[str]] = {}
     for b in routing.bursts:
+        if b.label != "burst":  # a moving bracket's frames are bracket frames: never gated
+            continue
         for c in b.members:
             sets[c] = b.members
     scene_frames: dict[int, list[str]] = {}

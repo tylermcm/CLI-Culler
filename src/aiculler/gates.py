@@ -64,12 +64,18 @@ def highlight_failures(values: dict[str, float], settings: "CullSettings") -> li
     return out
 
 
-def clip_penalty(values: dict[str, float], settings: "CullSettings") -> float:
-    """Score penalty for a mid-sized clipped region: 0 below clip_region_ignore, rising to clip_penalty at clip_region_reject."""
+def clip_penalty(values: dict[str, float], settings: "CullSettings", *, ungated: bool = False) -> float:
+    """Score penalty for a mid-sized clipped region: 0 below clip_region_ignore, rising to clip_penalty at clip_region_reject.
+
+    ``ungated``: for frames the gates never see (a moving bracket's), a region at or past clip_region_reject costs
+    the full penalty instead of nothing.
+    """
     g = settings.gates
     region = values.get("clip_region")
-    if region is None or region < g.clip_region_ignore or region >= g.clip_region_reject:
-        return 0.0  # small: free; large: the clip_region gate decides, not a penalty
+    if region is None or region < g.clip_region_ignore:
+        return 0.0  # small: free
+    if region >= g.clip_region_reject:
+        return g.clip_penalty if ungated else 0.0  # large: the clip_region gate decides, not a penalty
     span = g.clip_region_reject - g.clip_region_ignore
     return round(g.clip_penalty * min(1.0, (region - g.clip_region_ignore) / span), 4)
 
@@ -81,7 +87,8 @@ def apply_gates(
     out = GateResults()
     candidates: list[str] = []
     for b in routing.bursts:
-        candidates.extend(b.members)
+        if b.label == "burst":  # a moving bracket's frames are bracket frames: never gated
+            candidates.extend(b.members)
     for u in routing.units.values():
         if u.kind == "single" and u.rep is not None:
             candidates.append(u.rep)

@@ -379,3 +379,24 @@ def test_default_gates_pass_china_picks_with_margin():
     b.single("_DSC0570", scene=3, sharpness=100, **CHINA_8_26_CLOSEST_PICKS["_DSC0570"])
     d, _ = run(b)
     assert all(x.gates == [] and x.decision == "keep" for x in d.values())
+
+
+def test_moving_bracket_frames_compete_like_a_burst():
+    moving = "frames don't register (subject or camera moving): an HDR merge may ghost"
+    b = ShootBuilder()
+    b.group(
+        "exposure",
+        [{"name": "M1", "sharpness": 40, "mean": 0.2}, {"name": "M2", "sharpness": 90, "mean": 0.45},
+         {"name": "M3", "sharpness": 60, "mean": 0.7, "clip_region": 0.4}],
+        scene=1,
+        warnings=[moving],
+    )
+    d, _ = run(b, CullSettings(bursts_keep=1))
+    assert d["M2"].decision == "keep" and d["M1"].decision == d["M3"].decision == "reject"
+    assert "in moving bracket" in d["M1"].reasons[0] and d["M1"].comparison_set == d["M2"].comparison_set
+    assert d["M3"].gates == []  # a bracket frame: clipping costs a penalty, never a gate rejection
+    assert d["M3"].scores["clip_penalty"] == 0.15
+    assert d["M2"].reasons[-1].startswith("note: bracketeering: frames don't register")
+
+    d, _ = run(b, CullSettings(bursts_keep=1, moving_brackets="bracket"))
+    assert {d[n].decision for n in ("M1", "M2", "M3")} == {"keep"}  # keep_set, as any bracket

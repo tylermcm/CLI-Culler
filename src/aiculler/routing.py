@@ -8,7 +8,9 @@ Two levels of comparison set:
   unit per bracket, represented by ``best_exposed`` else ``representative``), burst winners, and focus
   stacks / timelapses when those are set to ``cull``. The top ``scene_keep`` units survive.
 
-A bracket's own frames never compete with each other. Groups left out of culling (``brackets=ignore``,
+A bracket's own frames never compete with each other, with one exception: a bracket bracketeering says does not
+register (subject or camera moving) is alternatives of a moment, not an HDR set, and with ``moving_brackets:
+as_burst`` its frames compete like a burst's (labelled "moving bracket"). Groups left out of culling (``brackets=ignore``,
 ``bursts_keep=0``, focus stacks / timelapses on ``keep_all``) are passed through: kept, not ranked.
 Nothing is compared across scenes.
 """
@@ -33,6 +35,7 @@ class Unit:
     captures: list[str]  # captures whose fate follows this unit (capture order)
     rep: str | None  # capture scored for the unit; bursts: filled in by decide() from the burst ranking
     rep_reason: str = ""
+    label: str = ""  # how reasons name it ("burst", "moving bracket"); empty: from the kind
 
 
 @dataclass
@@ -42,6 +45,7 @@ class ComparisonSet:
     members: list[str]  # captures (burst) or unit ids (scene), in capture order
     keep: int | None  # how many survive; None = not reduced (all kept)
     scene: int | None = None
+    label: str = "burst"  # how reasons name a burst set: "burst" or "moving bracket"
 
 
 @dataclass
@@ -81,7 +85,16 @@ def route(shoot: Shoot, settings: "CullSettings") -> Routing:
             continue
 
         unit: Unit | None = None
-        if g.kind == "exposure":
+        if ranks_as_burst(g, settings):
+            if settings.brackets == "ignore":
+                _passthrough(r, readable, "bracket left out of culling (brackets: ignore)")
+                continue
+            if settings.bursts_keep == 0:
+                _passthrough(r, readable, "moving bracket left out of culling (bursts_keep: 0)")
+                continue
+            r.bursts.append(ComparisonSet(g.id, "burst", readable, settings.bursts_keep, g.scene, label="moving bracket"))
+            unit = Unit(g.id, "burst", readable, None, label="moving bracket")
+        elif g.kind == "exposure":
             if settings.brackets == "ignore":
                 _passthrough(r, readable, "bracket left out of culling (brackets: ignore)")
                 continue
@@ -115,6 +128,14 @@ def route(shoot: Shoot, settings: "CullSettings") -> Routing:
     for key, members in scene_members.items():
         r.scenes.append(ComparisonSet(key, "scene", members, keep, scene_of[key]))
     return r
+
+
+MOVING = "frames don't register"
+
+
+def ranks_as_burst(g, settings: "CullSettings") -> bool:
+    """A bracket of a moving subject, culled like a burst (``moving_brackets: as_burst``)."""
+    return g.kind == "exposure" and settings.moving_brackets == "as_burst" and any(w.startswith(MOVING) for w in g.warnings)
 
 
 def _passthrough(r: Routing, captures: list[str], reason: str) -> None:
