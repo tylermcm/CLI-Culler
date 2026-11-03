@@ -1,0 +1,236 @@
+"""Shoot ingest: bracketeering grouping, capture identity and the preview cache.
+
+Everything downstream works on *captures* (bracketeering's shots), never on paths: a RAW, its JPEG
+sidecar, a copy in ``_picks/`` and an edited export are one capture with several files. Only the
+capture is scored; every file then gets its capture's decision.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+import numpy as np
+
+PREVIEW_SIZE = 1024  # long edge of the cached, decoded preview
+
+
+@dataclass(slots=True)
+class ExposureStats:
+    highlights_clipped: float
+    shadows_crushed: float
+    mean: float
+    flag: str
+
+    def to_dict(self) -> dict:
+        return {
+            "highlights_clipped": self.highlights_clipped,
+            "shadows_crushed": self.shadows_crushed,
+            "mean": self.mean,
+            "flag": self.flag,
+        }
+
+
+@dataclass(slots=True)
+class Capture:
+    """One physical capture (bracketeering shot)."""
+
+    id: str  # capture identity: body + shutter count, else body + time + frame number, else path
+    primary: str  # path of the primary file (the RAW when there is one)
+    files: list[str]  # every file of this capture, primary first
+    group: str  # bracketeering group id
+    position: int  # 1-based capture position in its group
+    role: str  # representative / member / single
+    exposure: ExposureStats | None = None
+    featureless: bool = False  # preview holds no structure (black misfire, moon in an empty sky)
+    exposure_time: float | None = None
+    focal_length: float | None = None
+    time: float | None = None
+    error: str | None = None  # primary file could not be read
+
+
+@dataclass(slots=True)
+class GroupInfo:
+    id: str
+    kind: str  # exposure / burst / focus / timelapse / single
+    confidence: float
+    warnings: list[str]
+    captures: list[str]  # capture ids in capture order
+    representative: str
+    best_exposed: str | None
+    scene: int | None
+    camera: str | None = None
+
+
+@dataclass(slots=True)
+class FileInfo:
+    path: str
+    capture: str
+    primary: bool
+    error: str | None = None
+
+
+@dataclass
+class Shoot:
+    """Bracketeering's view of a shoot, keyed by capture."""
+
+    groups: dict[str, GroupInfo]
+    captures: dict[str, Capture]
+    files: dict[str, FileInfo]
+    bracketeering_version: str
+    report: dict = field(default_factory=dict)  # bracketeering/2 JSON, for debugging and fixtures
+
+    def group_of(self, capture_id: str) -> GroupInfo:
+        return self.groups[self.captures[capture_id].group]
+
+
+def capture_identity(meta, fallback_path: Path) -> str:
+    """Stable id for one capture.
+
+    Body (make, model, serial) + shutter count when the maker notes give one; otherwise body +
+    capture time + file number; otherwise the resolved primary path.
+    """
+    body = "|".join(x.strip().lower() for x in (meta.make or "", meta.model or "", meta.serial or ""))
+    if meta.shutter_count is not None:
+        return f"{body}|sc:{meta.shutter_count}"
+    if meta.capture_time is not None:
+        fn = meta.file_number if meta.file_number is not None else "-"
+        return f"{body}|t:{meta.capture_time:.3f}|fn:{fn}"
+    return f"path:{fallback_path.resolve()}"
+
+
+def ingest(
+    folder: str | Path | list[str | Path],
+    *,
+    backend: str = "auto",
+    exclude: list[str] | tuple[str, ...] = (),
+    workers: int | None = None,
+    analyze: Callable | None = None,
+) -> Shoot:
+    """Run bracketeering on a shoot and index it by capture."""
+    import bracketeering
+    from bracketeering.pixels import MIN_DETAIL, detail
+    from bracketeering.report import to_dict
+
+    run = analyze or bracketeering.analyze
+    paths = folder if isinstance(folder, list) else [folder]
+    groups, unreadable = run([Path(p).resolve() for p in paths], backend=backend, pixels=True, exclude=list(exclude), workers=workers)
+    report = to_dict(groups, unreadable)
+    errors = {e["file"]: e["error"] for e in report["errors"]}
+
+    shoot_groups: dict[str, GroupInfo] = {}
+    captures: dict[str, Capture] = {}
+    files: dict[str, FileInfo] = {}
+    for g, entry in zip(groups, report["groups"]):
+        ids: list[str] = []
+        for pos, shot in enumerate(g.shots):
+            cid = capture_identity(shot.meta, shot.meta.path)
+            if cid in captures:  # two shots claim one identity (e.g. no counter, same second): keep them apart
+                cid = f"{cid}|path:{shot.meta.path.resolve()}"
+            px = shot.pixels
+            stats = None
+            featureless = False
+            if px is not None:
+                stats = ExposureStats(round(px.highlights, 4), round(px.shadows, 4), round(px.mean, 3), px.flag)
+                featureless = px.thumb is not None and detail(px.thumb) < MIN_DETAIL
+            primary = str(shot.meta.path)
+            captures[cid] = Capture(
+                id=cid,
+                primary=primary,
+                files=[primary] + [str(f.path) for f in shot.files if f is not shot.meta],
+                group=entry["id"],
+                position=pos + 1,
+                role=report["files"][primary]["role"],
+                exposure=stats,
+                featureless=featureless,
+                exposure_time=shot.meta.exposure_time,
+                focal_length=shot.meta.focal_length,
+                time=shot.meta.capture_time,
+                error=errors.get(primary),
+            )
+            for f in shot.files:
+                key = str(f.path)
+                files[key] = FileInfo(key, cid, f is shot.meta, errors.get(key))
+            ids.append(cid)
+        rep = ids[g.representative]
+        best = ids[g.best_exposed] if g.best_exposed is not None else None
+        shoot_groups[entry["id"]] = GroupInfo(
+            id=entry["id"],
+            kind=g.kind,
+            confidence=float(g.confidence),
+            warnings=list(g.warnings),
+            captures=ids,
+            representative=rep,
+            best_exposed=best,
+            scene=g.scene,
+            camera=entry.get("camera"),
+        )
+    # Every input file exactly once: bracketeering guarantees it; make sure nothing got lost on the way.
+    missing = set(report["files"]) - set(files)
+    if missing:
+        raise RuntimeError(f"bracketeering files not indexed by capture: {sorted(missing)[:5]}")
+    return Shoot(shoot_groups, captures, files, bracketeering.__version__, report)
+
+
+class PreviewCache:
+    """Decoded previews at ~1024 px, cached on disk by capture identity.
+
+    Uses ``bracketeering.preview.preview_source``, which parses the RAW container and returns its
+    largest decodable embedded JPEG (or the file itself for rendered formats). Never decodes RAW data.
+    """
+
+    def __init__(self, cache_dir: str | Path, size: int = PREVIEW_SIZE):
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.size = size
+
+    def path_for(self, capture_id: str) -> Path:
+        digest = hashlib.sha1(capture_id.encode("utf-8")).hexdigest()[:20]
+        return self.cache_dir / f"{digest}_{self.size}.jpg"
+
+    def load(self, capture: Capture):
+        """PIL RGB image of the capture's preview, or None if it has none."""
+        from PIL import Image
+
+        cached = self.path_for(capture.id)
+        if cached.exists():
+            try:
+                with Image.open(cached) as im:
+                    return im.convert("RGB")
+            except OSError:
+                cached.unlink(missing_ok=True)
+        image = None
+        for path in capture.files:  # primary first; a sidecar JPEG can stand in for an unreadable RAW
+            image = self._decode(Path(path))
+            if image is not None:
+                break
+        if image is None:
+            return None
+        tmp = cached.with_suffix(".tmp")
+        image.save(tmp, "JPEG", quality=92)
+        tmp.replace(cached)
+        return image
+
+    def _decode(self, path: Path):
+        from PIL import Image, ImageOps
+        from bracketeering.preview import preview_source
+
+        src = preview_source(path)
+        if src is None:
+            return None
+        try:
+            with Image.open(io.BytesIO(src) if isinstance(src, bytes) else src) as im:
+                im.draft("RGB", (self.size, self.size))
+                im = ImageOps.exif_transpose(im)
+                im = im.convert("RGB")
+                im.thumbnail((self.size, self.size), Image.Resampling.BILINEAR)
+                return im
+        except (OSError, ValueError, Image.DecompressionBombError):
+            return None
+
+
+def luma(image) -> np.ndarray:
+    return np.asarray(image.convert("L"), dtype=np.float32)
