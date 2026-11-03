@@ -26,6 +26,10 @@ from pathlib import Path
 
 SAMPLE_SCHEMA = "aiculler-sample/1"
 LABELS = ("keep", "borderline", "reject")
+PAGE_LABELS = ("keep", "borderline", "reject", "hero")  # hero: a select; counts as keep when calibrating
+# Signals a floor can judge: MANIQA, Q-ReAlign image quality, Q-ReAlign aesthetics.
+METRICS = ("maniqa", "qra_iqa", "appeal")
+METRIC_NAMES = {"maniqa": "MANIQA", "qra_iqa": "Q-ReAlign quality", "appeal": "Q-ReAlign aesthetics"}
 
 
 @dataclass
@@ -73,6 +77,7 @@ def make_sample(
     workers: int | None = None,
     progress=None,
     library: "LibraryBaseline | None" = None,
+    qrealign: bool = False,
 ) -> dict:
     """Draw, score and write the labelling page. Returns the sample document (also ``out/sample.json``).
 
@@ -82,7 +87,7 @@ def make_sample(
     from aiculler.ingest import PreviewCache, ingest
     from aiculler.routing import route
     from aiculler.scorers import ScoreStore, default_scorers, run_scorers
-    from aiculler.scorers.models import ManiqaScorer
+    from aiculler.scorers.models import AppealScorer, ManiqaScorer
     from aiculler.storage import ScoreCache
 
     settings = settings or CullSettings()
@@ -132,12 +137,22 @@ def make_sample(
                     maniqa_revision = scorer.revision
                 except Exception as exc:  # noqa: BLE001 - the sample is still useful without MANIQA; say so
                     warnings.append(f"maniqa: not used ({type(exc).__name__}: {exc})")
+            if qrealign and models is not None and models.available("q_realign"):
+                try:
+                    run_scorers(store, shoot, ids, [AppealScorer(models)], previews, cache, progress, batch_size=8, workers=workers)
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(f"q_realign: not used ({type(exc).__name__}: {exc})")
+            elif qrealign:
+                warnings.append("q_realign: not used (not available)")
             for cid in ids:
                 cap = shoot.captures[cid]
                 row = SampleRow("", key, cap.primary, cid, shoot.group_of(cid).kind, dict(store.scores.get(cid, {})))
                 rec = records.get((key, cid))
                 if rec is not None:
                     row.labels, row.techniques = list(rec["labels"]), list(rec["techniques"])
+                    for metric in METRICS:  # the library's scores (same model revisions), where this run has none
+                        if rec.get(metric) is not None and row.scores.get(metric) is None:
+                            row.scores[metric] = rec[metric]
                 rows.append(row)
     finally:
         cache.close()
@@ -197,12 +212,12 @@ main { max-width:1100px; margin:0 auto; padding:16px; }
 .frame img { width:100%; max-height:78vh; object-fit:contain; background:#0002; border-radius:6px; }
 .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 .row .id { margin-right:auto; }
-.frame[data-label=keep] { border-color:var(--keep); } .frame[data-label=borderline] { border-color:var(--border); } .frame[data-label=reject] { border-color:var(--reject); }
-button.on.keep { background:var(--keep); color:var(--bg); } button.on.borderline { background:var(--border); color:var(--bg); } button.on.reject { background:var(--reject); color:var(--bg); }
+.frame[data-label=keep], .frame[data-label=hero] { border-color:var(--keep); } .frame[data-label=hero] { border-width:4px; } .frame[data-label=borderline] { border-color:var(--border); } .frame[data-label=reject] { border-color:var(--reject); }
+button.on.keep, button.on.hero { background:var(--keep); color:var(--bg); } button.on.borderline { background:var(--border); color:var(--bg); } button.on.reject { background:var(--reject); color:var(--bg); }
 </style></head>
 <body>
 <header><h1>Quality baseline</h1><span id="count" class="muted"></span>
-<span class="muted">Keys: 1 keep, 2 borderline, 3 reject, ←/→ move</span>
+<span class="muted">Keys: 1 keep, 2 borderline, 3 reject, 4 hero (a select), ←/→ move</span>
 <button id="export">Export labels.csv</button></header>
 <main>
 <p class="muted">Judge each frame on its own, as if it were the only frame of its moment: would you keep it? Scores are hidden so they do not steer you. Labels are saved in this browser as you go; export when done and run <code>ai-culler calibrate</code> on this folder.</p>
@@ -224,7 +239,7 @@ function render() {
     el.id = "f" + it.id;
     el.innerHTML = `<img loading="lazy" src="thumbs/${it.id}.jpg" alt="frame ${it.id}">
       <div class="row"><span class="id muted">#${it.id} · ${i + 1} of ${ITEMS.length}</span>
-      ${["keep","borderline","reject"].map(l => `<button class="${l}${labels[it.id] === l ? " on" : ""}" data-l="${l}">${l}</button>`).join("")}</div>`;
+      ${["keep","borderline","reject","hero"].map(l => `<button class="${l}${labels[it.id] === l ? " on" : ""}" data-l="${l}">${l}</button>`).join("")}</div>`;
     el.querySelectorAll("button").forEach(b => b.onclick = () => { current = i; mark(b.dataset.l, false); });
     root.appendChild(el);
   });
@@ -236,7 +251,7 @@ function mark(label, advance = true) {
   render(); document.getElementById("f" + ITEMS[current].id).scrollIntoView({block: "start"});
 }
 document.addEventListener("keydown", e => {
-  const m = {"1": "keep", "2": "borderline", "3": "reject"}[e.key];
+  const m = {"1": "keep", "2": "borderline", "3": "reject", "4": "hero"}[e.key];
   if (m) return mark(m);
   if (e.key === "ArrowRight" || e.key === "ArrowDown") { current = Math.min(ITEMS.length - 1, current + 1); }
   else if (e.key === "ArrowLeft" || e.key === "ArrowUp") { current = Math.max(0, current - 1); }
@@ -262,104 +277,180 @@ def read_labels(path: Path) -> dict[str, str]:
     with open(path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             label = (row.get("label") or "").strip().lower()
-            if label not in LABELS:
-                raise ValueError(f"{path}: label must be one of {', '.join(LABELS)}; got {label!r} for id {row.get('id')}")
-            out[str(row["id"]).strip()] = label
+            if label not in PAGE_LABELS:
+                raise ValueError(f"{path}: label must be one of {', '.join(PAGE_LABELS)}; got {label!r} for id {row.get('id')}")
+            out[str(row["id"]).strip()] = "keep" if label == "hero" else label
     return out
 
 
-def mode_values(sample: dict, library: "LibraryBaseline | None", metric: str = "maniqa") -> dict[str, dict[str, float]]:
-    """id -> value per floor mode: raw (the score), and with a library: shoot, category and technique percentiles."""
-    out: dict[str, dict[str, float]] = {"raw": {}}
-    if library is not None:
-        out.update({"shoot": {}, "category": {}, "technique": {}})
+MODE_NOTES = {"raw": "the score", "shoot": "percentile in its own shoot",
+              "category": "percentile among its category", "technique": "percentile among its category (+ technique)"}
+
+
+def signal_values(sample: dict, library: "LibraryBaseline | None") -> dict[str, dict[str, float]]:
+    """"metric/mode" -> {row id: value}. raw for every signal the rows carry; with a library, also shoot, category and
+    technique percentiles for each signal the library holds."""
+    out: dict[str, dict[str, float]] = {}
     for r in sample["rows"]:
-        m = r["scores"].get(metric)
-        if m is None:
-            continue
-        out["raw"][r["id"]] = m
-        if library is None:
-            continue
-        pct = library.shoot_percentile(m, r["folder"])
-        if pct is not None:
-            out["shoot"][r["id"]] = pct
-        labels = r.get("labels") or []
-        if labels:
-            out["category"][r["id"]] = library.percentile(m, labels)[0]
-            out["technique"][r["id"]] = library.percentile(m, labels, r.get("techniques") or [])[0]
+        for metric in METRICS:
+            v = r["scores"].get(metric)
+            if v is None:
+                continue
+            out.setdefault(f"{metric}/raw", {})[r["id"]] = v
+            if library is None or metric not in library.metrics:
+                continue
+            pct = library.shoot_percentile(v, r["folder"], metric)
+            if pct is not None:
+                out.setdefault(f"{metric}/shoot", {})[r["id"]] = pct
+            labels = r.get("labels") or []
+            if labels:
+                out.setdefault(f"{metric}/category", {})[r["id"]] = library.percentile(v, labels, (), metric)[0]
+                out.setdefault(f"{metric}/technique", {})[r["id"]] = library.percentile(v, labels, r.get("techniques") or [], metric)[0]
     return out
 
 
-def calibrate(sample: dict, labels: dict[str, str], *, metric: str = "maniqa", margin: float = 0.02,
-              review_share: float = 0.10, library: "LibraryBaseline | None" = None) -> dict:
-    """For each floor mode: distribution per label, suggested levels, and how many rejects each level catches while
-    every keep (and borderline) stays above it. The modes compare as the research's A (raw), B (category) and C
-    (category + technique); burst ranking (D) is in every cull regardless."""
-    values = mode_values(sample, library, metric)
-    modes = {}
-    for mode, vals in values.items():
+def _stats(vs: list[float]) -> dict:
+    if not vs:
+        return {"n": 0}
+    n = len(vs)
+    return {"n": n, "min": vs[0], "p10": vs[n // 10], "median": vs[n // 2], "p90": vs[min(n - 1, (9 * n) // 10)], "max": vs[-1]}
+
+
+def _safe_level(vals: dict[str, float], labels: dict[str, str], ids) -> float | None:
+    """The highest level with no keep or borderline below it: the lowest such frame's value."""
+    protected = [vals[i] for i in ids if labels[i] in ("keep", "borderline")]
+    return min(protected) if protected else None
+
+
+def _best_pair(a: dict[str, float], b: dict[str, float], labels: dict[str, str], ids) -> tuple[float, float, int]:
+    """Levels (ta, tb) maximising rejects with a < ta AND b < tb, with no keep or borderline in both: (ta, tb, caught)."""
+    protected = [i for i in ids if labels[i] in ("keep", "borderline")]
+    rejects = [i for i in ids if labels[i] == "reject"]
+    best = (float("-inf"), float("-inf"), 0)
+    for ta in sorted({a[i] for i in ids}) + [float("inf")]:
+        below = [b[i] for i in protected if a[i] < ta]
+        tb = min(below) if below else float("inf")
+        caught = sum(1 for i in rejects if a[i] < ta and b[i] < tb)
+        if caught > best[2]:
+            best = (ta, tb, caught)
+    return best
+
+
+def calibrate(sample: dict, labels: dict[str, str], *, margin: float = 0.02, review_share: float = 0.10,
+              library: "LibraryBaseline | None" = None) -> dict:
+    """Every signal (MANIQA, Q-ReAlign quality, Q-ReAlign aesthetics) in every mode, and MANIQA + Q-ReAlign quality
+    together, judged at the same keeper recall:
+
+    * ``all_safe``: rejects caught at the highest level with none of your keeps (or borderlines) below it, fitted on
+      all the labels (optimistic: the level is chosen on the frames it is scored on);
+    * ``safe95``: the same, allowing 5% of keeps below;
+    * ``held_out``: each shoot in turn, with the level fitted on the other shoots: keeps lost and rejects caught,
+      summed (the honest estimate; needs labels from several shoots).
+
+    Fusion without trained probabilities: ``either`` rejects a frame below either signal's safe level; ``both`` only
+    below both, with the pair of levels chosen so no keep is below both."""
+    values = signal_values(sample, library)
+    folder = {r["id"]: r["folder"] for r in sample["rows"]}
+    rejects_total = sum(1 for i, lab in labels.items() if lab == "reject" and i in values.get("maniqa/raw", {}))
+    signals: dict[str, dict] = {}
+    for name, vals in values.items():
         ids = [i for i in vals if i in labels]
         by = {lab: sorted(vals[i] for i in ids if labels[i] == lab) for lab in LABELS}
         if not by["keep"]:
             continue
-        protected = by["keep"] + by["borderline"]
-        reject_at = round(max(0.0, min(protected) - margin), 3)
+        safe = _safe_level(vals, labels, ids)
         keeps = by["keep"]
+        k95 = keeps[int(0.05 * len(keeps))]
+        reject_at = round(max(0.0, safe - margin), 3)
         allowed = int(review_share * len(keeps))
         review_at = max(round(keeps[allowed] if allowed < len(keeps) else keeps[-1], 3), reject_at)
-        k95 = keeps[int(0.05 * len(keeps))]  # a level that loses at most 5% of keeps
 
-        def caught(t: float) -> dict[str, int]:
-            return {lab: sum(1 for v in by[lab] if v < t) for lab in LABELS}
+        def caught(t: float, _by=by) -> dict[str, int]:
+            return {lab: sum(1 for v in _by[lab] if v < t) for lab in LABELS}
 
-        def stats(vs: list[float]) -> dict:
-            if not vs:
-                return {"n": 0}
-            n = len(vs)
-            return {"n": n, "min": vs[0], "p10": vs[n // 10], "median": vs[n // 2], "p90": vs[min(n - 1, (9 * n) // 10)], "max": vs[-1]}
-
+        held = {"keeps_lost": 0, "borderline_lost": 0, "rejects_caught": 0, "folds": 0}
+        for f in sorted({folder[i] for i in ids}):
+            train = [i for i in ids if folder[i] != f]
+            level = _safe_level(vals, labels, train)
+            if level is None:
+                continue
+            held["folds"] += 1
+            level -= margin
+            for i in ids:
+                if folder[i] == f and vals[i] < level:
+                    held[{"keep": "keeps_lost", "borderline": "borderline_lost", "reject": "rejects_caught"}[labels[i]]] += 1
         lo, hi = min(min(v) for v in by.values() if v), max(max(v) for v in by.values() if v)
-        step = 0.01 if mode == "raw" else 0.02
+        step = 0.01 if name.endswith("/raw") else 0.02
         sweep, t = [], round(int(lo / step) * step, 2)
         while t <= hi + step:
             sweep.append({"threshold": round(t, 2), **caught(t)})
             t += step
-        modes[mode] = {
-            "labelled": len(ids),
-            "distribution": {lab: stats(by[lab]) for lab in LABELS},
+        signals[name] = {
+            "labelled": len(ids), "distribution": {lab: _stats(by[lab]) for lab in LABELS},
             "suggested": {"quality_reject": reject_at, "quality_review": review_at},
             "caught": {"quality_reject": caught(reject_at), "quality_review": caught(review_at)},
-            "rejects_caught_all_keeps_safe": caught(min(keeps))["reject"],
-            "rejects_caught_95_keeps": caught(k95)["reject"],
-            "sweep": sweep,
+            "all_safe": caught(safe)["reject"], "safe95": caught(k95)["reject"], "held_out": held, "sweep": sweep,
         }
-    if "raw" not in modes:
-        raise ValueError(f"no frame labelled keep has a {metric} score: nothing to calibrate against")
-    rejects = sum(1 for i, lab in labels.items() if lab == "reject" and i in values["raw"])
-    return {"metric": metric, "rejects": rejects, "rules": {"margin": margin, "review_share": review_share}, "modes": modes,
-            "unscored": sum(1 for r in sample["rows"] if r["id"] in labels and r["scores"].get(metric) is None)}
-
-
-MODE_NOTES = {"raw": "A: the MANIQA score", "shoot": "its percentile in its own shoot",
-              "category": "B: its percentile among frames of its category", "technique": "C: category, and category + EXIF technique"}
+    fusion: dict[str, dict] = {}
+    for mode in ("raw", "shoot", "category", "technique"):
+        a, b = values.get(f"maniqa/{mode}"), values.get(f"qra_iqa/{mode}")
+        if not a or not b:
+            continue
+        ids = [i for i in a if i in b and i in labels]
+        if not any(labels[i] == "keep" for i in ids):
+            continue
+        sa, sb = _safe_level(a, labels, ids), _safe_level(b, labels, ids)
+        either = sum(1 for i in ids if labels[i] == "reject" and (a[i] < sa or b[i] < sb))
+        ta, tb, both = _best_pair(a, b, labels, ids)
+        held_e = {"keeps_lost": 0, "rejects_caught": 0}
+        held_b = {"keeps_lost": 0, "rejects_caught": 0}
+        for f in sorted({folder[i] for i in ids}):
+            train, test = [i for i in ids if folder[i] != f], [i for i in ids if folder[i] == f]
+            la, lb = _safe_level(a, labels, train), _safe_level(b, labels, train)
+            if la is None:
+                continue
+            pa, pb, _ = _best_pair(a, b, labels, train)
+            for i in test:
+                key = "keeps_lost" if labels[i] != "reject" else "rejects_caught"
+                if a[i] < la - margin or b[i] < lb - margin:
+                    held_e[key] += 1
+                if a[i] < pa and b[i] < pb:
+                    held_b[key] += 1
+        fusion[mode] = {"either": {"all_safe": either, "held_out": held_e, "levels": [sa, sb]},
+                        "both": {"all_safe": both, "held_out": held_b, "levels": [ta, tb]}}
+    if not signals:
+        raise ValueError("no frame labelled keep has a score: nothing to calibrate against")
+    return {"rejects": rejects_total, "folders": len(set(folder.values())), "rules": {"margin": margin, "review_share": review_share},
+            "signals": signals, "fusion": fusion,
+            "unscored": sum(1 for r in sample["rows"] if r["id"] in labels and r["scores"].get("maniqa") is None)}
 
 
 def render_calibration(cal: dict) -> str:
     r = cal["rules"]
-    lines = [f"# Quality floor calibration ({cal['metric']})", ""]
+    lines = ["# Quality floor calibration", ""]
     if cal["unscored"]:
-        lines += [f"{cal['unscored']} labelled frames have no score and are left out.", ""]
-    lines += ["## Modes compared", "",
-              f"Rejects caught out of the {cal['rejects']} frames you labelled reject, at a level below which none of your keeps fall, "
-              "and at one that loses at most 5% of them (higher is better):", "",
-              "| Mode | What the level compares | Rejects caught, every keep safe | Rejects caught, 95% of keeps safe |",
-              "|---|---|---|---|"]
-    for mode, m in cal["modes"].items():
-        lines.append(f"| `{mode}` | {MODE_NOTES[mode]} | {m['rejects_caught_all_keeps_safe']} | {m['rejects_caught_95_keeps']} |")
-    for mode, m in cal["modes"].items():
+        lines += [f"{cal['unscored']} labelled frames have no MANIQA score and are left out.", ""]
+    lines += [f"{cal['rejects']} frames labelled reject, from {cal['folders']} shoot(s). **All keeps safe**: rejects caught at the highest "
+              "level with none of your keeps or borderlines below it (fitted on these same labels: optimistic). **95%**: "
+              "allowing 5% of keeps below. **Held out**: each shoot judged with a level fitted on the others "
+              "(keeps lost / rejects caught; the honest estimate).", "",
+              "| Signal | Compared as | All keeps safe | 95% | Held out: keeps lost | Held out: rejects caught |",
+              "|---|---|---|---|---|---|"]
+    for name, m in cal["signals"].items():
+        metric, mode = name.split("/")
+        h = m["held_out"]
+        held = (str(h["keeps_lost"] + h["borderline_lost"]), str(h["rejects_caught"])) if h["folds"] > 1 else ("–", "–")
+        lines.append(f"| {METRIC_NAMES[metric]} | {MODE_NOTES[mode]} | {m['all_safe']} | {m['safe95']} | {held[0]} | {held[1]} |")
+    for mode, f in cal["fusion"].items():
+        for rule, label in (("either", "MANIQA or Q-ReAlign quality"), ("both", "MANIQA and Q-ReAlign quality")):
+            x = f[rule]
+            h = x["held_out"]
+            held = (str(h["keeps_lost"]), str(h["rejects_caught"])) if cal["folders"] > 1 else ("–", "–")
+            lines.append(f"| {label} | {MODE_NOTES[mode]} | {x['all_safe']} | – | {held[0]} | {held[1]} |")
+    for name, m in cal["signals"].items():
+        metric, mode = name.split("/")
         d, s, c = m["distribution"], m["suggested"], m["caught"]
-        unit = "score" if mode == "raw" else "percentile"
-        lines += ["", f"## `{mode}` ({unit})", "", f"{m['labelled']} labelled frames.", "",
+        lines += ["", f"## {METRIC_NAMES[metric]}, {MODE_NOTES[mode]}", "", f"{m['labelled']} labelled frames.", "",
                   "| Label | n | min | p10 | median | p90 | max |", "|---|---|---|---|---|---|---|"]
         for lab in LABELS:
             x = d[lab]
@@ -368,9 +459,10 @@ def render_calibration(cal: dict) -> str:
                   f"- `quality_reject`: **{s['quality_reject']}** (lowest keep or borderline minus {r['margin']}). Below it: "
                   f"{c['quality_reject']['reject']} reject, {c['quality_reject']['borderline']} borderline, {c['quality_reject']['keep']} keep.",
                   f"- `quality_review`: **{s['quality_review']}** (at most {r['review_share']:.0%} of keeps below it). Below it: "
-                  f"{c['quality_review']['reject']} reject, {c['quality_review']['borderline']} borderline, {c['quality_review']['keep']} keep.",
-                  "", "```json", json.dumps({"gates": {"quality_mode": mode, **s}}, indent=2), "```", "",
-                  "| Below | keep | borderline | reject |", "|---|---|---|---|"]
+                  f"{c['quality_review']['reject']} reject, {c['quality_review']['borderline']} borderline, {c['quality_review']['keep']} keep."]
+        if metric == "maniqa":
+            lines += ["", "```json", json.dumps({"gates": {"quality_mode": mode, **s}}, indent=2), "```"]
+        lines += ["", "| Below | keep | borderline | reject |", "|---|---|---|---|"]
         for row in m["sweep"]:
             lines.append(f"| {row['threshold']:.2f} | {row['keep']} | {row['borderline']} | {row['reject']} |")
     return "\n".join(lines) + "\n"
@@ -383,74 +475,86 @@ MIN_CELL = 50  # a category (or category + technique) cell needs this many frame
 
 
 class LibraryBaseline:
-    def __init__(self, doc: dict, min_cell: int = MIN_CELL):
-        from bisect import bisect_left  # noqa: F401 - used in percentile
+    """Per-signal score distributions: the whole library, each shoot, each category, each category + technique.
+    Each signal (MANIQA, Q-ReAlign quality, Q-ReAlign aesthetics) has its own; a record without a signal is left out
+    of that signal's distributions."""
 
+    def __init__(self, doc: dict, min_cell: int = MIN_CELL):
         if doc.get("schema") != LIBRARY_SCHEMA:
             raise ValueError(f"expected a library baseline ({LIBRARY_SCHEMA}), got {doc.get('schema')!r}")
         self.doc, self.min_cell = doc, min_cell
-        cells: dict[str, list[float]] = {"all": []}
+        self.cells: dict[str, dict[str, list[float]]] = {}
         for r in doc["records"]:
-            m = r["maniqa"]
-            cells["all"].append(m)
-            cells.setdefault(f"shoot:{r['shoot']}", []).append(m)
-            for label in r["labels"]:
-                cells.setdefault(label, []).append(m)
-                for flag in r["techniques"]:
-                    cells.setdefault(f"{label}+{flag}", []).append(m)
-        self.cells = {k: sorted(v) for k, v in cells.items()}
+            for metric in METRICS:
+                v = r.get(metric)
+                if v is None:
+                    continue
+                cells = self.cells.setdefault(metric, {"all": []})
+                cells["all"].append(v)
+                cells.setdefault(f"shoot:{r['shoot']}", []).append(v)
+                for label in r["labels"]:
+                    cells.setdefault(label, []).append(v)
+                    for flag in r["techniques"]:
+                        cells.setdefault(f"{label}+{flag}", []).append(v)
+        self.cells = {m: {k: sorted(v) for k, v in c.items()} for m, c in self.cells.items()}
+
+    @property
+    def metrics(self) -> list[str]:
+        return [m for m in METRICS if m in self.cells]
 
     @classmethod
     def load(cls, path) -> "LibraryBaseline":
         return cls(json.loads(Path(path).read_text(encoding="utf-8")))
 
-    def check(self, maniqa: str | None, tinyclip: str | None) -> None:
-        """Refuse a baseline scored with another MANIQA, TinyCLIP or category version: its scores would not compare."""
+    def check(self, maniqa: str | None, tinyclip: str | None, q_realign: str | None = None) -> None:
+        """Refuse a baseline scored with another model, prompt or category version: its scores would not compare."""
         from aiculler.categories import VERSION
 
         d = self.doc
         for what, mine, theirs in (("MANIQA", maniqa, d["maniqa"]), ("TinyCLIP", tinyclip, d["tinyclip"]),
-                                   ("categories", VERSION, d["categories_version"])):
-            if mine is not None and mine != theirs:
+                                   ("Q-ReAlign", q_realign, d.get("q_realign")), ("categories", VERSION, d["categories_version"])):
+            if mine is not None and theirs is not None and mine != theirs:
                 raise ValueError(f"library baseline was built with {what} {theirs}, this run uses {mine}: rebuild it")
 
-    def size(self, cell: str) -> int:
-        return len(self.cells.get(cell, ()))
+    def size(self, cell: str, metric: str = "maniqa") -> int:
+        return len(self.cells.get(metric, {}).get(cell, ()))
 
-    def _pct(self, cell: str, value: float) -> float:
+    def _pct(self, cell: str, value: float, metric: str) -> float:
         from bisect import bisect_left
 
-        ref = self.cells[cell]
+        ref = self.cells[metric][cell]
         return bisect_left(ref, value) / len(ref)
 
-    def percentile(self, value: float, labels: list[str], flags: list[str] = ()) -> tuple[float, str]:
+    def percentile(self, value: float, labels: list[str], flags: list[str] = (), metric: str = "maniqa") -> tuple[float, str]:
         """The most favourable percentile among the frame's usable cells (its categories; with flags, also category +
         technique), and that cell's name; the whole library when no cell has min_cell frames."""
-        cells = [c for c in labels if self.size(c) >= self.min_cell]
-        cells += [f"{c}+{f}" for c in labels for f in flags if self.size(f"{c}+{f}") >= self.min_cell]
+        cells = [c for c in labels if self.size(c, metric) >= self.min_cell]
+        cells += [f"{c}+{f}" for c in labels for f in flags if self.size(f"{c}+{f}", metric) >= self.min_cell]
         if not cells:
-            return self._pct("all", value), f"all {self.size('all')} library frames"
-        best = max(cells, key=lambda c: self._pct(c, value))
-        return self._pct(best, value), f"{self.size(best)} {best.replace('+', ' + ')} frames"
+            return self._pct("all", value, metric), f"all {self.size('all', metric)} library frames"
+        best = max(cells, key=lambda c: self._pct(c, value, metric))
+        return self._pct(best, value, metric), f"{self.size(best, metric)} {best.replace('+', ' + ')} frames"
 
-    def shoot_percentile(self, value: float, shoot: str) -> float | None:
+    def shoot_percentile(self, value: float, shoot: str, metric: str = "maniqa") -> float | None:
         cell = f"shoot:{shoot}"
-        return self._pct(cell, value) if self.size(cell) >= self.min_cell else None
+        return self._pct(cell, value, metric) if self.size(cell, metric) >= self.min_cell else None
 
-    def summary(self) -> dict[str, int]:
-        return {k: len(v) for k, v in sorted(self.cells.items(), key=lambda kv: -len(kv[1])) if not k.startswith("shoot:")}
+    def summary(self, metric: str = "maniqa") -> dict[str, int]:
+        cells = self.cells.get(metric, {})
+        return {k: len(v) for k, v in sorted(cells.items(), key=lambda kv: -len(kv[1])) if not k.startswith("shoot:")}
 
 
 def build_library(folders: list[Path], models, *, cache_db: Path | None = None, cache_dir: Path | None = None,
-                  settings=None, workers: int | None = None, progress=None) -> dict:
+                  settings=None, workers: int | None = None, progress=None, qrealign: bool = False) -> dict:
     """Score every competing frame of each shoot with MANIQA and TinyCLIP (TinyCLIP on every readable capture, as
-    cull does, so later culls reuse the embeddings) and record maniqa, categories and technique flags."""
+    cull does, so later culls reuse the embeddings) and record maniqa, categories and technique flags; with
+    ``qrealign``, also Q-ReAlign quality and aesthetics (and their level probabilities) for every competing frame."""
     from aiculler.api import CullSettings, floor_applies
     from aiculler.categories import VERSION, build_prototypes, classify, techniques
     from aiculler.ingest import PreviewCache, ingest
     from aiculler.routing import route
     from aiculler.scorers import ScoreStore, run_scorers
-    from aiculler.scorers.models import ManiqaScorer, TinyClipScorer
+    from aiculler.scorers.models import AppealScorer, ManiqaScorer, TinyClipScorer
     from aiculler.storage import ScoreCache
 
     if models is None or not (models.available("maniqa") and models.available("tinyclip")):
@@ -461,7 +565,10 @@ def build_library(folders: list[Path], models, *, cache_db: Path | None = None, 
         cache_dir = Path(str(Path(cache_db).with_suffix("")) + "_previews") if cache_db else Path(".aiculler_cache")
     previews = PreviewCache(cache_dir)
     cache = ScoreCache(cache_db) if cache_db else ScoreCache(":memory:")
+    if qrealign and not models.available("q_realign"):
+        raise ValueError("Q-ReAlign was asked for but is not available (install it with the app's Set Up AI)")
     maniqa, tinyclip = ManiqaScorer(models), TinyClipScorer(models)
+    appeal = AppealScorer(models) if qrealign else None
     records: list[dict] = []
     try:
         protos = build_prototypes(models.engine("tinyclip"), tinyclip.revision)
@@ -473,16 +580,25 @@ def build_library(folders: list[Path], models, *, cache_db: Path | None = None, 
             store = ScoreStore()
             run_scorers(store, shoot, readable, [tinyclip], previews, cache, progress, batch_size=8, workers=workers)
             run_scorers(store, shoot, competing, [maniqa], previews, cache, progress, batch_size=8, workers=workers)
+            if appeal is not None:
+                run_scorers(store, shoot, competing, [appeal], previews, cache, progress, batch_size=8, workers=workers)
             for cid in competing:
                 m = store.scores.get(cid, {}).get("maniqa")
                 emb = store.details.get(cid, {}).get("embedding")
                 if m is None or not emb:
                     continue
                 cat = classify(emb, protos)
-                records.append({"shoot": str(folder), "capture": cid, "path": shoot.captures[cid].primary, "maniqa": m,
-                                "labels": cat["labels"], "techniques": techniques(shoot.captures[cid])})
+                rec = {"shoot": str(folder), "capture": cid, "path": shoot.captures[cid].primary, "maniqa": m,
+                       "maniqa_spread": store.scores.get(cid, {}).get("maniqa_spread"),
+                       "labels": cat["labels"], "techniques": techniques(shoot.captures[cid])}
+                values = store.scores.get(cid, {})
+                if appeal is not None and values.get("qra_iqa") is not None:
+                    rec.update({"qra_iqa": values["qra_iqa"], "appeal": values["appeal"],
+                                "qra_probs": store.details.get(cid, {}).get("qra_probs")})
+                records.append(rec)
     finally:
         cache.close()
         models.close()
     return {"schema": LIBRARY_SCHEMA, "maniqa": maniqa.revision, "tinyclip": tinyclip.revision,
+            "q_realign": appeal.revision if appeal is not None else None,
             "categories_version": VERSION, "shoots": [str(f) for f in folders], "records": records}

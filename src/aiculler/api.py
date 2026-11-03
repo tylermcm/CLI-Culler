@@ -236,6 +236,9 @@ class FileDecision:
     people: list[int] = field(default_factory=list)  # person numbers in this capture (the "people" feature)
     categories: list[str] = field(default_factory=list)  # what it shows (TinyCLIP, when it ran), most likely first
     techniques: list[str] = field(default_factory=list)  # EXIF technique flags (high_iso, long_lens, ...)
+    # Raw model outputs kept for reproduction and later fusion: MANIQA per-crop scores and boxes, Q-ReAlign's five
+    # level probabilities per task (see scorers.models).
+    outputs: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -266,6 +269,9 @@ class CullResult:
         from aiculler.outputs import decisions_document
 
         return decisions_document(self)
+
+
+OUTPUT_DETAILS = ("maniqa_crops", "maniqa_boxes", "maniqa_size", "qra_probs")
 
 
 def floor_applies(shoot, routing, capture: str) -> bool:
@@ -579,6 +585,8 @@ def cull(
         for d in files.values():
             d.categories = list(catinfo.get(d.capture, {}).get("labels", []))
             d.techniques = techniques(shoot.captures[d.capture])
+            detail = store.details.get(d.capture, {})
+            d.outputs = {k: detail[k] for k in OUTPUT_DETAILS if k in detail}
         index = build_index(shoot, used, embeddings if "tinyclip" in used else {}, people, settings, catinfo)
 
     stats = {

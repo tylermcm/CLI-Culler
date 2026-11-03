@@ -43,7 +43,7 @@ def test_sample_then_calibrate(tmp_path):
         w.writerow(["id", "name", "label"])
         for i, lab in labels.items():
             w.writerow([i, "x", lab])
-    cal = calibrate(doc, read_labels(out / "labels.csv"))["modes"]["raw"]
+    cal = calibrate(doc, read_labels(out / "labels.csv"))["signals"]["maniqa/raw"]
     lowest_protected = rows[2]["scores"]["maniqa"]
     assert cal["suggested"]["quality_reject"] == pytest.approx(lowest_protected - 0.02, abs=1e-3)
     assert cal["caught"]["quality_reject"]["keep"] == cal["caught"]["quality_reject"]["borderline"] == 0
@@ -184,9 +184,9 @@ def test_calibrate_compares_modes_with_a_library(tmp_path):
         {"id": "4", "folder": "s", "scores": {"maniqa": 0.101}, "labels": ["animals"], "techniques": []},
     ]
     cal = calibrate({"rows": rows}, {"1": "keep", "2": "keep", "3": "reject", "4": "reject"}, library=lib)
-    m = cal["modes"]
-    assert m["raw"]["rejects_caught_all_keeps_safe"] == 1  # only the bottom animal is below the low animal keep
-    assert m["category"]["rejects_caught_all_keeps_safe"] == 2  # as percentiles of their category, both fall below
+    m = cal["signals"]
+    assert m["maniqa/raw"]["all_safe"] == 1  # only the bottom animal is below the low animal keep
+    assert m["maniqa/category"]["all_safe"] == 2  # as percentiles of their category, both fall below
 
 
 def test_shoot_mode_floor_uses_the_shoots_own_percentiles(tmp_path):
@@ -205,3 +205,29 @@ def test_shoot_mode_floor_uses_the_shoots_own_percentiles(tmp_path):
     assert rejected == ["S00", "S01", "S02"]  # percentiles 0, 0.04, 0.08 of 25 frames
     assert "percentile 0.00 of this shoot's 25 frames" in d["S00"].reasons[0]
     assert len(set(maniqa.seen)) == 25  # a shoot percentile needs every competing frame scored
+
+
+def test_fusion_both_catches_what_neither_signal_can_alone():
+    rows = [
+        {"id": "k1", "folder": "a", "scores": {"maniqa": 0.20, "qra_iqa": 0.90}},  # MANIQA dislikes this keep
+        {"id": "k2", "folder": "b", "scores": {"maniqa": 0.90, "qra_iqa": 0.20}},  # Q-ReAlign dislikes this one
+        {"id": "r1", "folder": "a", "scores": {"maniqa": 0.30, "qra_iqa": 0.30}},  # both mildly dislike this reject
+    ]
+    cal = calibrate({"rows": rows}, {"k1": "keep", "k2": "keep", "r1": "reject"})
+    assert cal["signals"]["maniqa/raw"]["all_safe"] == 0 and cal["signals"]["qra_iqa/raw"]["all_safe"] == 0
+    assert cal["fusion"]["raw"]["either"]["all_safe"] == 0 and cal["fusion"]["raw"]["both"]["all_safe"] == 1
+
+
+def test_held_out_shoots_report_keeps_lost():
+    rows = [{"id": f"a{i}", "folder": "A", "scores": {"maniqa": 0.40 + i / 100}} for i in range(5)]
+    rows += [{"id": "b0", "folder": "B", "scores": {"maniqa": 0.30}}, {"id": "b1", "folder": "B", "scores": {"maniqa": 0.10}}]
+    labels = {f"a{i}": "keep" for i in range(5)} | {"b0": "keep", "b1": "reject"}
+    h = calibrate({"rows": rows}, labels)["signals"]["maniqa/raw"]["held_out"]
+    # Shoot B judged with a level fitted on A (0.40 - 0.02): its keep at 0.30 is lost, its reject caught.
+    assert h == {"keeps_lost": 1, "borderline_lost": 0, "rejects_caught": 1, "folds": 2}
+
+
+def test_hero_counts_as_keep(tmp_path):
+    p = tmp_path / "labels.csv"
+    p.write_text("id,name,label\n001,x,hero\n002,y,reject\n")
+    assert read_labels(p) == {"001": "keep", "002": "reject"}

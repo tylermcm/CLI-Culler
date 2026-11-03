@@ -1142,10 +1142,10 @@ def command_sample(args) -> int:
         from aiculler.baseline import LibraryBaseline
 
         library = LibraryBaseline.load(args.baseline)
-    registry = _load_registry(args, {"maniqa"})
+    registry = _load_registry(args, {"maniqa"} | ({"q_realign"} if args.qrealign else set()))
     try:
         doc = make_sample(folders, args.out, n=args.n, seed=args.seed, models=registry, cache_db=args.db,
-                          cache_dir=args.cache, workers=args.workers, library=library)
+                          cache_dir=args.cache, workers=args.workers, library=library, qrealign=args.qrealign)
     except (ValueError, FileNotFoundError) as exc:
         raise SystemExit(f"ai-culler: {exc}") from exc
     for w in doc["warnings"]:
@@ -1173,10 +1173,12 @@ def command_calibrate(args) -> int:
     except (ValueError, FileNotFoundError) as exc:
         raise SystemExit(f"ai-culler calibrate: {exc}") from exc
     _write_text(args.out, render_calibration(cal))
-    for mode, m in cal["modes"].items():
-        s = m["suggested"]
-        print(f"{mode}: quality_reject {s['quality_reject']}, quality_review {s['quality_review']}; "
-              f"rejects caught with every keep safe {m['rejects_caught_all_keeps_safe']} of {cal['rejects']}", file=sys.stderr)
+    for name, m in cal["signals"].items():
+        h = m["held_out"]
+        print(f"{name}: all keeps safe catches {m['all_safe']} of {cal['rejects']} rejects; held out: "
+              f"{h['keeps_lost'] + h['borderline_lost']} keeps lost, {h['rejects_caught']} rejects caught", file=sys.stderr)
+    for mode, f in cal["fusion"].items():
+        print(f"maniqa+qra_iqa/{mode}: either {f['either']['all_safe']}, both {f['both']['all_safe']} rejects with all keeps safe", file=sys.stderr)
     return 0
 
 
@@ -1187,7 +1189,7 @@ def command_baseline(args) -> int:
     for folder in folders:
         if not folder.is_dir():
             raise SystemExit(f"ai-culler: folder not found: {folder}")
-    registry = _load_registry(args, {"maniqa", "tinyclip"})
+    registry = _load_registry(args, {"maniqa", "tinyclip"} | ({"q_realign"} if args.qrealign else set()))
     last: dict[str, int] = {}
 
     def on_progress(stage: str, done: int, total: int) -> None:
@@ -1197,7 +1199,8 @@ def command_baseline(args) -> int:
             print(f"[{stage}] {done}/{total}", file=sys.stderr)
 
     try:
-        doc = build_library(folders, registry, cache_db=args.db, cache_dir=args.cache, workers=args.workers, progress=on_progress)
+        doc = build_library(folders, registry, cache_db=args.db, cache_dir=args.cache, workers=args.workers, progress=on_progress,
+                            qrealign=args.qrealign)
     except ValueError as exc:
         raise SystemExit(f"ai-culler baseline: {exc}") from exc
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -1454,6 +1457,7 @@ def build_parser() -> argparse.ArgumentParser:
     sample_cmd.add_argument("--models", default="auto", help="Where the app's models are (as for cull); MANIQA scores the sample")
     sample_cmd.add_argument("--device", default="auto")
     sample_cmd.add_argument("--workers", type=int)
+    sample_cmd.add_argument("--qrealign", action="store_true", help="Also score the sample with Q-ReAlign (quality and aesthetics)")
     sample_cmd.add_argument("--baseline", type=Path, help="Library baseline (ai-culler baseline): spread the draw evenly across categories")
     sample_cmd.set_defaults(func=command_sample)
 
@@ -1473,6 +1477,7 @@ def build_parser() -> argparse.ArgumentParser:
     baseline_cmd.add_argument("--models", default="auto", help="Where the app's models are (as for cull)")
     baseline_cmd.add_argument("--device", default="auto")
     baseline_cmd.add_argument("--workers", type=int)
+    baseline_cmd.add_argument("--qrealign", action="store_true", help="Also score every frame with Q-ReAlign (quality and aesthetics)")
     baseline_cmd.set_defaults(func=command_baseline)
 
     learn_cmd = subparsers.add_parser("learn", help="Train a preference model (TinyCLIP) from your past culls")

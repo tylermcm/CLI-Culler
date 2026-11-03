@@ -31,3 +31,15 @@ def test_maniqa_engine_refuses_the_wrong_checkpoint(tmp_path):
     torch.save({"unrelated.weight": torch.zeros(1)}, tmp_path / MANIQA_CHECKPOINT)
     with pytest.raises(RuntimeError, match="does not match the MANIQA network"):
         ManiqaEngine(tmp_path, "cpu")
+
+
+def test_float16_conv3d_runs_in_float32():
+    import torch
+
+    from aiculler.models.engines import _conv3d_in_float32
+
+    net = torch.nn.Sequential(torch.nn.Conv3d(3, 4, kernel_size=(2, 4, 4), stride=(2, 4, 4)), torch.nn.Flatten()).half()
+    _conv3d_in_float32(torch, net)
+    assert net[0].weight.dtype == torch.float32
+    out = net(torch.randn(1, 3, 2, 8, 8, dtype=torch.float16))
+    assert out.dtype == torch.float16

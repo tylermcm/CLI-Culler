@@ -299,3 +299,30 @@ def test_quality_floor_rejects_lone_frames_and_moves_contests_on(shoot, tmp_path
     maniqa.seen.clear()
     off = cull(shoot, CullSettings(bursts_keep=1, models=["maniqa"]), models=reg, cache_db=tmp_path / "c2.sqlite")
     assert 200 not in maniqa.seen and {f.decision for p, f in off.files.items() if "DSC_0100" in p} == {"keep"}
+
+
+class FullManiqa(FakeManiqa):
+    """A MANIQA fake with per-crop output, like ManiqaEngine.assess."""
+
+    def assess(self, image):
+        m = self.score(image)
+        return {"score": m, "crops": [m - 0.01, m + 0.01], "boxes": [[0, 0, 224, 224], [10, 10, 234, 234]], "spread": 0.01, "size": [1280, 853]}
+
+
+class FullQRealign:
+    LONG_EDGE = 1024
+
+    def assess(self, image, tasks=("iqa", "iaa")):
+        m = read_marker(image) / 100
+        return {"iqa": {"probs": [0.1, 0.6, 0.2, 0.1, 0.0], "score": min(1.0, m)}, "iaa": {"probs": [0.0, 0.3, 0.5, 0.2, 0.0], "score": 0.5}}
+
+
+def test_raw_model_outputs_are_kept(shoot, tmp_path):
+    reg = ModelRegistry.fake({"maniqa": FullManiqa({}), "q_realign": FullQRealign()})
+    result = cull(shoot, CullSettings(bursts_keep=1, models=["maniqa", "appeal"]), models=reg, cache_db=tmp_path / "c.sqlite")
+    shortlisted = [f for f in result.files.values() if "qra_iqa" in f.scores]
+    assert shortlisted, "Q-ReAlign ran on the shortlist"
+    f = shortlisted[0]
+    assert f.scores["appeal"] == 0.5 and "maniqa_spread" in f.scores
+    assert f.outputs["qra_probs"]["iqa"] == [0.1, 0.6, 0.2, 0.1, 0.0] and len(f.outputs["maniqa_crops"]) == 2
+    assert result.models["appeal"].endswith("+iqa+iaa+official-p0-stemids-v1")

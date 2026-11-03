@@ -71,38 +71,61 @@ class FacesScorer:
 
 
 class ManiqaScorer:
+    """MANIQA. Scores: ``maniqa`` (mean over the crops), ``maniqa_spread`` (standard deviation of the crop scores:
+    spatial variation of predicted quality; not a validated defect detector). Details: ``maniqa_crops`` (per-crop
+    scores), ``maniqa_boxes`` (crop boxes, pixels of the scored image), ``maniqa_size`` (that image's size)."""
+
     name = "maniqa"
     needs_pixels = False
 
     def __init__(self, registry):
         self.registry = registry
-        self.revision = f"{registry.revision('maniqa')}+crops20-1280-v1"
+        self.revision = f"{registry.revision('maniqa')}+crops20-1280-v2-percrop"
 
     def score(self, batch) -> list[dict]:
         engine = self.registry.engine("maniqa")
         out = []
         for cand in batch:
             image = cand.model_image(engine.LONG_EDGE)
-            out.append({} if image is None else {"maniqa": round(engine.score(image), 5)})
+            if image is None:
+                out.append({})
+            elif hasattr(engine, "assess"):
+                a = engine.assess(image)
+                out.append({"maniqa": round(a["score"], 5), "maniqa_spread": round(a["spread"], 5), "maniqa_crops": a["crops"],
+                            "maniqa_boxes": a["boxes"], "maniqa_size": a["size"]})
+            else:  # an engine with a score only (tests)
+                out.append({"maniqa": round(engine.score(image), 5)})
         return out
 
 
 class AppealScorer:
-    """Q-ReAlign Mini 0.8B: probability-weighted aesthetic level, 0 (bad) .. 1 (excellent)."""
+    """Q-ReAlign Mini 0.8B, both official tasks. Scores: ``appeal`` (aesthetics, IAA) and ``qra_iqa`` (image quality,
+    IQA), each the probability-weighted level, 0 (bad) .. 1 (excellent). Detail: ``qra_probs``, the five level
+    probabilities per task ({"iqa": [excellent, good, fair, poor, bad], "iaa": [...]}). A quality score is not a
+    probability that the frame is a keeper."""
 
     name = "appeal"
     needs_pixels = False
 
     def __init__(self, registry):
+        from aiculler.models.engines import QREALIGN_PROMPT_VERSION
+
         self.registry = registry
-        self.revision = f"q_realign:{registry.revision('q_realign')}+1024-v1"
+        self.revision = f"q_realign:{registry.revision('q_realign')}+1024+iqa+iaa+{QREALIGN_PROMPT_VERSION}"
 
     def score(self, batch) -> list[dict]:
         engine = self.registry.engine("q_realign")
         out = []
         for cand in batch:
             image = cand.model_image(engine.LONG_EDGE)
-            out.append({} if image is None else {"appeal": round(engine.score(image), 5)})
+            if image is None:
+                out.append({})
+            elif hasattr(engine, "assess"):
+                a = engine.assess(image)
+                out.append({"appeal": round(a["iaa"]["score"], 5), "qra_iqa": round(a["iqa"]["score"], 5),
+                            "qra_probs": {task: r["probs"] for task, r in a.items()}})
+            else:  # an engine with a score only (tests)
+                out.append({"appeal": round(engine.score(image), 5)})
         return out
 
 

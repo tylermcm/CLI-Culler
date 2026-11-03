@@ -18,8 +18,13 @@ MANIQA_CROP_SEED = 20
 FACES_LONG_EDGE = 1280
 FACES_MAX = 10
 QREALIGN_LONG_EDGE = 1024
-QREALIGN_QUESTION = "Can you rate the aesthetics of this picture?"
-QREALIGN_ANSWER_STEM = "The aesthetics of the image is"
+# The official Q-ReAlign tasks (qalign/prompts.py, first prompt of each pool, as qalign/infer.py uses): the question,
+# and the answer stem the model completes with a level word. The stem routes the task.
+QREALIGN_TASKS = {
+    "iqa": ("Can you rate the quality of this picture?", "The quality of the image is"),  # image quality
+    "iaa": ("How is the aesthetics of this image?", "The aesthetics of the image is"),  # image aesthetics
+}
+QREALIGN_PROMPT_VERSION = "official-p0-stemids-v1"  # bump when the prompts or the way they are built change
 QREALIGN_LEVELS = ("excellent", "good", "fair", "poor", "bad")
 QREALIGN_WEIGHTS = (1.0, 0.75, 0.5, 0.25, 0.0)
 MANIQA_CHECKPOINT = "ckpt_koniq10k.pt"
@@ -37,7 +42,8 @@ def pick_device(torch, requested: str) -> str:
 
 
 class ManiqaEngine:
-    """MANIQA (KonIQ-10k): mean over 20 seeded 224 px crops of the frame at a 1280 px long edge."""
+    """MANIQA (KonIQ-10k): mean over 20 seeded 224 px crops of the frame at a 1280 px long edge (the official
+    predict_one_image procedure: 20 random crops, averaged; here seeded, so a frame always gets the same crops)."""
 
     LONG_EDGE = MANIQA_LONG_EDGE
 
@@ -61,7 +67,9 @@ class ManiqaEngine:
         net = net.to(self.device).eval()
         self.net = net.half() if self.half else net
 
-    def score(self, image) -> float:
+    def assess(self, image) -> dict:
+        """{"score": mean, "crops": per-crop scores, "boxes": [left, top, right, bottom] in the scored image's pixels,
+        "spread": standard deviation of the crop scores, "size": [width, height] of the scored image}."""
         np, torch = self.np, self.torch
         if min(image.size) <= MANIQA_CROP_SIZE:
             from PIL import Image
@@ -71,18 +79,42 @@ class ManiqaEngine:
         pixels = np.asarray(image, dtype=np.float32) / 255.0
         height, width = pixels.shape[:2]
         rng = np.random.default_rng(MANIQA_CROP_SEED)
-        crops = []
+        crops, boxes = [], []
         for _ in range(MANIQA_CROPS):
             top, left = int(rng.integers(0, height - MANIQA_CROP_SIZE)), int(rng.integers(0, width - MANIQA_CROP_SIZE))
             crops.append(pixels[top:top + MANIQA_CROP_SIZE, left:left + MANIQA_CROP_SIZE])
+            boxes.append([left, top, left + MANIQA_CROP_SIZE, top + MANIQA_CROP_SIZE])
         batch = torch.from_numpy(np.stack(crops)).permute(0, 3, 1, 2)
         batch = ((batch - 0.5) / 0.5).to(self.device, dtype=torch.float16 if self.half else torch.float32)
         with torch.inference_mode():
-            return float(self.net(batch).float().mean())
+            per_crop = self.net(batch).float().reshape(-1).cpu().numpy()
+        return {"score": float(per_crop.mean()), "crops": [round(float(v), 5) for v in per_crop], "boxes": boxes,
+                "spread": float(per_crop.std()), "size": [width, height]}
+
+    def score(self, image) -> float:
+        return self.assess(image)["score"]
+
+
+def _conv3d_in_float32(torch, model) -> None:
+    """Run the vision patch embedding (a Conv3d) in float32 inside a float16 model. On a V100 (torch 2.9, cuDNN 9.10)
+    a float16 Conv3d falls back to PyTorch's generic slow_conv_dilated3d: 24 s for one 1024 px frame, against 2 ms in
+    float32. The layer is tiny, so this costs nothing measurable in memory."""
+    for module in model.modules():
+        if isinstance(module, torch.nn.Conv3d) and module.weight.dtype == torch.float16:
+            module.float()
+            forward = module.forward
+
+            def run(x, _forward=forward):
+                return _forward(x.float()).half()
+
+            module.forward = run
 
 
 class QRealignEngine:
-    """Q-ReAlign Mini 0.8B: probability-weighted aesthetic level (excellent 1.0 .. bad 0.0) at a 1024 px long edge."""
+    """Q-ReAlign Mini 0.8B, scored the official way (qalign/scorer.py): the user turn (image + task question), then
+    the answer-stem tokens (" The quality of the image is"), one forward pass, the softmax over the five level
+    words' first tokens at the last position, and their weighted mean (excellent 1.0 .. bad 0.0). Images are given
+    at a 1024 px long edge, as the app does; the processor's own resizing applies on top."""
 
     LONG_EDGE = QREALIGN_LONG_EDGE
 
@@ -99,24 +131,49 @@ class QRealignEngine:
         model_class = auto or transformers.Qwen3_5ForConditionalGeneration
         model = model_class.from_pretrained(str(model_dir), dtype=dtype, local_files_only=True)
         self.model = model.to(self.device).eval()
+        if self.half:
+            _conv3d_in_float32(torch, self.model)
         tokenizer = self.processor.tokenizer
         self.level_ids = [tokenizer(" " + word, add_special_tokens=False)["input_ids"][0] for word in QREALIGN_LEVELS]
         if len(set(self.level_ids)) != len(self.level_ids):
             raise RuntimeError("Q-ReAlign level words share a first token; the tokenizer is not the expected one.")
+        self.stem_ids = {task: tokenizer(" " + stem, add_special_tokens=False)["input_ids"] for task, (_, stem) in QREALIGN_TASKS.items()}
         self.weights = torch.tensor(QREALIGN_WEIGHTS, dtype=torch.float32, device=self.device)
 
-    def score(self, image) -> float:
+    def _inputs(self, image, task: str):
         torch = self.torch
-        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": QREALIGN_QUESTION}]}]
-        prompt = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
-        inputs = self.processor(text=[prompt + QREALIGN_ANSWER_STEM], images=[image], return_tensors="pt")
+        question, _ = QREALIGN_TASKS[task]
+        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": question}]}]
+        # Qwen3.5's chat template ends the generation prompt with an empty thinking block either way.
+        text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=False)
+        inputs = dict(self.processor(text=[text], images=[image], return_tensors="pt"))
+        n = inputs["input_ids"].shape[1]
+        stem = torch.tensor([self.stem_ids[task]], dtype=inputs["input_ids"].dtype)
+        for key, value in list(inputs.items()):
+            if key == "input_ids":
+                inputs[key] = torch.cat([value, stem], dim=1)
+            elif hasattr(value, "shape") and value.dim() == 2 and value.shape[1] == n:  # attention mask, token types
+                fill = torch.ones_like(stem, dtype=value.dtype) if key == "attention_mask" else torch.zeros_like(stem, dtype=value.dtype)
+                inputs[key] = torch.cat([value, fill], dim=1)
         inputs = {k: (v.to(self.device) if hasattr(v, "to") else v) for k, v in inputs.items()}
         if self.half:
             inputs = {k: (v.half() if getattr(v, "is_floating_point", lambda: False)() else v) for k, v in inputs.items()}
-        with torch.inference_mode():
-            logits = self.model(**inputs).logits[0, -1].float()
-        probabilities = torch.softmax(logits[self.level_ids], dim=-1)
-        return float((probabilities * self.weights).sum())
+        return inputs
+
+    def assess(self, image, tasks=("iqa", "iaa")) -> dict:
+        """{task: {"probs": [excellent, good, fair, poor, bad], "score": weighted mean}} for each task."""
+        torch = self.torch
+        out = {}
+        for task in tasks:
+            with torch.inference_mode():
+                logits = self.model(**self._inputs(image, task)).logits[0, -1].float()
+            probabilities = torch.softmax(logits[self.level_ids], dim=-1)
+            out[task] = {"probs": [round(float(p), 5) for p in probabilities], "score": float((probabilities * self.weights).sum())}
+        return out
+
+    def score(self, image) -> float:
+        """The aesthetics score (the appeal signal)."""
+        return self.assess(image, ("iaa",))["iaa"]["score"]
 
 
 def _overlap(a, b) -> float:

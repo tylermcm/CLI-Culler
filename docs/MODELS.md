@@ -38,3 +38,21 @@ Pins, checked against `bundles.py` (they match `CULLING_ENGINE_SPEC.md` §2):
 | AdaFace IR-50 (UniFace ONNX) | `yakhyo/uniface-weights` @ `bfcc7d48ea8412d55de406cecf96b65b3ca720b2` | `adaface_ir_50.onnx` | 174,396,180 | `9c0ae385d7362323c92d218de598d32e52a9130b78faac6a8a924091aca62c0b` |
 | Q-ReAlign Mini 0.8B | `q-future/Q-ReAlign-Mini-0.8B` @ `fe1f45a7574c9e9d908875af9f7e90cb946aa19f` | `model.safetensors` (+ 7 config/tokenizer files) | 2,214,590,296 | `bde34df0375fff90d2dee716a127039c57d310c0c868b9f52f4fc2d1ead34aac` |
 | TinyCLIP | see `ai_manifest.py` | | | |
+
+## Q-ReAlign and MANIQA: what is kept, and how they are run
+
+- **Q-ReAlign** asks both official tasks (`qalign/prompts.py`, first prompt of each pool, as `qalign/infer.py` does):
+  image quality ("Can you rate the quality of this picture?" / stem "The quality of the image is") and aesthetics
+  ("How is the aesthetics of this image?" / "The aesthetics of the image is"). As in `qalign/scorer.py`, the stem is
+  appended as token ids (with its leading space) after the templated user turn; Qwen3.5's template ends with an
+  empty thinking block either way. Scores: `qra_iqa` (quality) and `appeal` (aesthetics); `outputs.qra_probs`
+  keeps the five level probabilities per task. The image is given at a 1024 px long edge, as the app does (the
+  processor's own resizing applies on top); this differs from the reference, which hands the processor the full
+  image. Revision `...+1024+iqa+iaa+official-p0-stemids-v1`.
+- **MANIQA** keeps its score (the mean of 20 seeded 224 px crops at 1280 px, unchanged) and now also each crop's
+  score and box (`outputs.maniqa_crops`, `maniqa_boxes`, `maniqa_size`) and their spread (`maniqa_spread`).
+- **Speed on a V100.** A float16 `Conv3d` (Q-ReAlign's vision patch embedding) falls back to PyTorch's generic
+  `slow_conv_dilated3d` on this card (torch 2.9, cuDNN 9.10): 24 s per frame. The engine runs that one layer in
+  float32: 0.45 s per frame for both tasks, identical scores, 2 GB of GPU memory. The app's ranker worker loads the
+  model the same way and will be just as slow on such a card. `flash-linear-attention` (optional) supplies
+  Qwen3.5's linear-attention kernels; without it transformers uses slower reference code.
