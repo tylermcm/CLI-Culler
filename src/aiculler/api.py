@@ -21,6 +21,7 @@ FEATURELESS_MODES = ("review", "reject", "off")
 NORMALISE_MODES = ("relative", "rank", "zscore")
 REVIEW_WARNING_MODES = ("doubt", "all", "none")
 MANIQA_SCOPES = ("keepers", "all")
+QUALITY_MODES = ("raw", "shoot", "category", "technique")
 # Optional models. The cull is complete without any of them: gates reject the junk, and bursts, brackets and
 # near-duplicate scenes are culled on exposure, sharpness and clipping. Each one adds something:
 #   faces   MediaPipe: blinks and face-crop sharpness count when ranking (contested frames only)
@@ -60,6 +61,12 @@ class GateSettings:
     # PROVISIONAL: set from four shoots; to be replaced by a labelled baseline (ai-culler sample / calibrate).
     quality_reject: float = 0.0
     quality_review: float = 0.0
+    # What the levels compare against: "raw" (the MANIQA score itself), "shoot" (its percentile among this shoot's
+    # competing frames, 0-1; MANIQA then scores all of them), "category" (its percentile among frames of the same
+    # TinyCLIP category in a library baseline, 0-1) or "technique" (category, and category + EXIF technique cells
+    # such as wildlife at high ISO). With several labels or cells the most favourable percentile counts.
+    quality_mode: str = "raw"
+    quality_baseline: str | None = None  # library baseline (ai-culler baseline) for "category" / "technique"
     # Severe blur (needs MANIQA): MANIQA in the shoot's bottom maniqa_bottom fraction AND face (else whole-frame)
     # sharpness below blur_ratio x the median of its comparison set.
     maniqa_bottom: float = 0.02
@@ -147,6 +154,9 @@ class CullSettings:
         check("normalise", self.normalise, NORMALISE_MODES)
         check("review_warnings", self.review_warnings, REVIEW_WARNING_MODES)
         check("maniqa_scope", self.maniqa_scope, MANIQA_SCOPES)
+        check("gates.quality_mode", self.gates.quality_mode, QUALITY_MODES)
+        if self.gates.quality_mode != "raw" and max(self.gates.quality_reject, self.gates.quality_review) > 1:
+            raise ValueError("gates: in a percentile quality_mode the levels are percentiles, 0..1")
         for m in self.models:
             check("models", m, MODEL_FEATURES + ("all",))
         g = self.gates
@@ -176,10 +186,18 @@ class CullSettings:
             out.add("faces")
         return out
 
+    def category_floor(self) -> bool:
+        """The quality floor judges MANIQA against category baselines (needs TinyCLIP and MANIQA)."""
+        g = self.gates
+        return "maniqa" in self.models and g.quality_mode in ("category", "technique") and (g.quality_reject > 0 or g.quality_review > 0)
+
+    def needs_tinyclip(self) -> bool:
+        return "search" in self.features() or bool(self.preference_model) or self.category_floor()
+
     def model_keys(self) -> set[str]:
         """Registry keys these settings may load."""
         keys = {k for f in self.features() for k in FEATURE_MODELS[f]}
-        if self.preference_model:
+        if self.needs_tinyclip():
             keys.add("tinyclip")
         return keys
 
@@ -216,6 +234,8 @@ class FileDecision:
     reasons: list[str] = field(default_factory=list)
     gates: list[str] = field(default_factory=list)  # gates this capture failed, even if rescued or overridden
     people: list[int] = field(default_factory=list)  # person numbers in this capture (the "people" feature)
+    categories: list[str] = field(default_factory=list)  # what it shows (TinyCLIP, when it ran), most likely first
+    techniques: list[str] = field(default_factory=list)  # EXIF technique flags (high_iso, long_lens, ...)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -254,11 +274,69 @@ def floor_applies(shoot, routing, capture: str) -> bool:
     return capture not in routing.passthrough and shoot.group_of(capture).kind != "exposure"
 
 
-def build_index(shoot, used: dict[str, str], embeddings: dict[str, list[float]], people, settings: CullSettings) -> dict:
+def make_floor_value(settings: CullSettings, shoot, routing, candidates, store, catinfo, used, warnings):
+    """capture -> (value the floor levels compare, its description), or None (floor off, with a warning)."""
+    from bisect import bisect_left
+
+    mode = settings.gates.quality_mode
+
+    def maniqa(cid):
+        return store.scores.get(cid, {}).get("maniqa")
+
+    if mode == "raw":
+        return lambda cid: (maniqa(cid), "" if maniqa(cid) is None else f"MANIQA {maniqa(cid):.3f}")
+    if mode == "shoot":
+        ref = sorted(v for c in candidates if floor_applies(shoot, routing, c) and (v := maniqa(c)) is not None)
+        if len(ref) < 20:
+            warnings.append(f"quality floor: not used (shoot mode needs MANIQA on at least 20 frames; {len(ref)} scored)")
+            return None
+
+        def by_shoot(cid):
+            m = maniqa(cid)
+            if m is None:
+                return None, ""
+            pct = bisect_left(ref, m) / len(ref)
+            return pct, f"MANIQA {m:.3f}, percentile {pct:.2f} of this shoot's {len(ref)} frames"
+        return by_shoot
+    # category / technique
+    from aiculler.baseline import LibraryBaseline
+
+    path = settings.gates.quality_baseline
+    if not path:
+        warnings.append(f"quality floor: not used ({mode} mode needs gates.quality_baseline, from ai-culler baseline)")
+        return None
+    try:
+        lib = LibraryBaseline.load(path)
+        lib.check(used.get("maniqa"), used.get("tinyclip"))
+    except (OSError, ValueError) as exc:
+        warnings.append(f"quality floor: not used ({exc})")
+        return None
+    if not catinfo:
+        warnings.append(f"quality floor: not used ({mode} mode needs TinyCLIP categories)")
+        return None
+    from aiculler.categories import techniques
+
+    def by_category(cid):
+        m = maniqa(cid)
+        if m is None:
+            return None, ""
+        labels = catinfo.get(cid, {}).get("labels", [])
+        pct, cell = lib.percentile(m, labels, techniques(shoot.captures[cid]) if mode == "technique" else [])
+        return pct, f"MANIQA {m:.3f}, percentile {pct:.2f} of {cell}"
+    return by_category
+
+
+def build_index(shoot, used: dict[str, str], embeddings: dict[str, list[float]], people, settings: CullSettings,
+                catinfo: dict[str, dict] | None = None) -> dict:
     """The index for semantic and people search: what the "search" and "people" features found, per capture."""
     index: dict = {}
     if embeddings:
         index["search"] = {"model": used.get("tinyclip", ""), "embeddings": dict(embeddings)}
+        if catinfo:
+            from aiculler.categories import VERSION
+
+            index["search"]["categories_version"] = VERSION
+            index["search"]["categories"] = {cid: c["labels"] for cid, c in catinfo.items()}
     if people:
         index["people"] = {
             "model": used.get("faces", ""),
@@ -375,9 +453,18 @@ def cull(
             preference = PreferenceModel.load(settings.preference_model)
         readable = [cid for cid, c in shoot.captures.items() if not c.error]
 
-        # 1. TinyCLIP embeddings (every readable capture: the search index), optional scene refinement.
-        if "search" in features or preference is not None:
-            run_model("tinyclip", "tinyclip", TinyClipScorer, readable)
+        # 1. TinyCLIP first, on every readable capture (every bracket and burst frame, kept or not), whatever needs it:
+        # embeddings for search, categories for every capture, scene refinement, preference, the category floor.
+        catinfo: dict[str, dict] = {}
+        if settings.needs_tinyclip() and run_model("tinyclip", "tinyclip", TinyClipScorer, readable):
+            try:
+                from aiculler.categories import build_prototypes, classify
+
+                with stage("categories"):
+                    protos = build_prototypes(registry.engine("tinyclip"), used["tinyclip"])
+                    catinfo = {cid: classify(d["embedding"], protos) for cid, d in store.details.items() if d.get("embedding")}
+            except Exception as exc:  # noqa: BLE001 - no text encoder (tokenizers missing...): embeddings still stand
+                warnings.append(f"categories: not used ({type(exc).__name__}: {exc})")
         embeddings = {cid: d["embedding"] for cid, d in store.details.items() if d.get("embedding")}
         scene_stats: dict[str, int] = {}
         if settings.refine_scenes and embeddings:
@@ -405,7 +492,8 @@ def cull(
         run_model("faces", "face_landmarker", FacesScorer, face_frames)
 
         # 5. MANIQA on contested frames (or every competing frame: maniqa_scope all), then the severe-blur gate.
-        maniqa_frames = sorted(live) if settings.maniqa_scope == "keepers" else [c for c in candidates if not gates.failed(c)]
+        every = settings.maniqa_scope == "all" or settings.gates.quality_mode == "shoot"  # a shoot percentile needs them all
+        maniqa_frames = [c for c in candidates if not gates.failed(c)] if every else sorted(live)
         if "maniqa" in features and run_model("maniqa", "maniqa", ManiqaScorer, maniqa_frames):
             with stage("gates"):
                 for cid, failure in blur_failures(shoot, routing, gates, store.scores, settings).items():
@@ -438,6 +526,10 @@ def cull(
         floor_stats = {"quality_rejected": 0, "quality_review": 0, "floor_rounds": 0}
         with stage("decide"):
             files = decide(shoot, routing, gates, store.scores, settings)
+        floor_value = None
+        if floor:
+            floor_value = make_floor_value(settings, shoot, routing, candidates, store, catinfo, used, warnings)
+            floor = floor_value is not None
         checked: set[str] = set()
         while floor:
             keepers = [d.capture for d in files.values() if d.primary and d.decision == "keep" and d.capture not in checked
@@ -452,7 +544,7 @@ def cull(
             changed = False
             for cid in keepers:
                 checked.add(cid)
-                failure, flag = quality_check(store.scores.get(cid, {}).get("maniqa"), settings)
+                failure, flag = quality_check(*floor_value(cid), settings)
                 if failure is not None:
                     gates.failures.setdefault(cid, []).append(failure)
                     floor_stats["quality_rejected"] += 1
@@ -482,7 +574,12 @@ def cull(
             else:
                 people_stats = {"people": len(people)}
             tag_people(people, files)
-        index = build_index(shoot, used, embeddings if "tinyclip" in used else {}, people, settings)
+        from aiculler.categories import techniques
+
+        for d in files.values():
+            d.categories = list(catinfo.get(d.capture, {}).get("labels", []))
+            d.techniques = techniques(shoot.captures[d.capture])
+        index = build_index(shoot, used, embeddings if "tinyclip" in used else {}, people, settings, catinfo)
 
     stats = {
         "captures": len(shoot.captures),

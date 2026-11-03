@@ -63,7 +63,8 @@ def write_index(result: "CullResult", path: str | Path) -> Path | None:
 
     * ``meta``: JSON (schema, engine version, model revisions, face cluster threshold)
     * ``captures`` (str), ``files`` (str), ``file_capture`` (int, into ``captures``): every file of the shoot
-    * search: ``clip`` (float32, unit length, one row per embedded capture), ``clip_capture`` (int)
+    * search: ``clip`` (float32, unit length, one row per embedded capture), ``clip_capture`` (int),
+      ``capture_categories`` (str per capture, comma-separated TinyCLIP categories, most likely first)
     * people: one row per face: ``face_capture`` (int), ``face_index`` (its position in the capture's faces),
       ``face_person`` (1-based person number, as in decisions.json), ``face_box`` (left, top, right, bottom as
       fractions of the upright frame), ``face_area``, ``face_eyes_closed`` (NaN when unknown), ``face_embedding``
@@ -89,6 +90,9 @@ def write_index(result: "CullResult", path: str | Path) -> Path | None:
         meta["search_model"] = search["model"]
         arrays["clip"] = np.asarray([search["embeddings"][c] for c in ids], dtype=np.float32)
         arrays["clip_capture"] = np.asarray([pos[c] for c in ids], dtype=np.int32)
+        if search.get("categories"):
+            meta["categories_version"] = search["categories_version"]
+            arrays["capture_categories"] = np.asarray([",".join(search["categories"].get(c, [])) for c in captures], dtype=str)
     people = index.get("people")
     if people:
         faces = people["faces"]

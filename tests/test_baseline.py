@@ -43,7 +43,7 @@ def test_sample_then_calibrate(tmp_path):
         w.writerow(["id", "name", "label"])
         for i, lab in labels.items():
             w.writerow([i, "x", lab])
-    cal = calibrate(doc, read_labels(out / "labels.csv"))
+    cal = calibrate(doc, read_labels(out / "labels.csv"))["modes"]["raw"]
     lowest_protected = rows[2]["scores"]["maniqa"]
     assert cal["suggested"]["quality_reject"] == pytest.approx(lowest_protected - 0.02, abs=1e-3)
     assert cal["caught"]["quality_reject"]["keep"] == cal["caught"]["quality_reject"]["borderline"] == 0
@@ -62,3 +62,128 @@ def test_bad_labels_are_refused(tmp_path):
     p.write_text("id,name,label\n001,x,maybe\n")
     with pytest.raises(ValueError, match="label must be one of"):
         read_labels(p)
+
+
+# --------------------------------------------------------------------------- categories and library baselines
+
+
+class TextClip:
+    """Fake TinyCLIP with a text side: an image's marker picks its axis; a prompt's category picks the same axis."""
+
+    AXES = {"animals": 0, "landscape": 1, "night": 2}
+
+    def __init__(self, image_axis):
+        self.image_axis = image_axis  # marker -> axis
+
+    def embed(self, image):
+        from shootgen import read_marker
+
+        v = [0.05] * 4
+        v[self.image_axis.get(read_marker(image), 3)] = 1.0
+        n = sum(x * x for x in v) ** 0.5
+        return [x / n for x in v]
+
+    def encode_text(self, prompt):
+        from aiculler.categories import CATEGORIES
+
+        cat = next(c for c, ps in CATEGORIES.items() if prompt in ps)
+        v = [0.0] * 4
+        v[self.AXES.get(cat, 3)] = 1.0
+        return v
+
+
+def test_classify_is_multi_label_and_techniques_read_exif():
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from aiculler.categories import Prototypes, classify, techniques
+
+    protos = Prototypes(["a", "b", "c"], np.eye(3, dtype=np.float32), "m")
+    both = classify(np.array([0.7071, 0.7071, 0.0]), protos)
+    assert set(both["labels"]) == {"a", "b"} and both["primary"] in ("a", "b")
+    assert classify(np.array([1.0, 0.0, 0.0]), protos)["labels"] == ["a"]
+    cap = SimpleNamespace(iso=6400, exposure_time=1 / 1000, focal_length=500, f_number=5.6, flash=False)
+    assert techniques(cap) == ["high_iso", "long_lens"]
+
+
+def test_library_percentiles_prefer_the_most_favourable_usable_cell():
+    from aiculler.baseline import LIBRARY_SCHEMA, LibraryBaseline
+    from aiculler.categories import VERSION
+
+    recs = [{"shoot": "s", "capture": f"a{i}", "maniqa": 0.10 + i / 1000, "labels": ["animals"], "techniques": ["long_lens"]} for i in range(60)]
+    recs += [{"shoot": "s", "capture": f"l{i}", "maniqa": 0.40 + i / 1000, "labels": ["landscape"], "techniques": []} for i in range(60)]
+    lib = LibraryBaseline({"schema": LIBRARY_SCHEMA, "maniqa": "m", "tinyclip": "t", "categories_version": VERSION, "records": recs})
+    # 0.13 is low for the library (bottom quarter) but mid-pack for animals.
+    assert lib.percentile(0.13, ["landscape"])[0] == 0.0
+    pct, cell = lib.percentile(0.13, ["landscape", "animals"])
+    assert abs(pct - 0.5) < 0.02 and "animals" in cell
+    assert lib.percentile(0.13, ["macro"])[1].startswith("all 120")  # no cell: the whole library
+    assert "animals + long_lens" in lib.percentile(0.13, ["animals"], ["long_lens"])[1] or lib.percentile(0.13, ["animals"], ["long_lens"])[0] >= 0.5
+    with pytest.raises(ValueError, match="rebuild it"):
+        lib.check("other-maniqa", "t")
+
+
+def test_category_floor_end_to_end(tmp_path):
+    """An animal frame with a low MANIQA score is fine among animals; a landscape frame with the same score is not."""
+    from aiculler import CullSettings, cull
+    from aiculler.api import GateSettings
+    from aiculler.baseline import LibraryBaseline, build_library
+
+    lib_root = tmp_path / "library"
+    # Library: animals score low (0.10-0.16), landscapes high (0.40-0.46).
+    # (Markers are read back to the nearest 10: 10 marks the animal frames, 20 the landscapes.)
+    frames = [Frame(f"DSC_{i:04d}", i * 37.0 + (i % 3), i % 8, marker=10 if i < 60 else 20) for i in range(120)]
+    write_shoot(lib_root, frames)
+    axis = {10: 0, 20: 1}
+    quality = {10: 0.10, 20: 0.40}
+    reg = ModelRegistry.fake({"maniqa": FakeManiqa(quality), "tinyclip": TextClip(axis)})
+    doc = build_library([lib_root], reg, cache_db=tmp_path / "lib.sqlite")
+    lib = LibraryBaseline(doc)
+    assert lib.size("animals") >= 50 and lib.size("landscape") >= 50
+    path = tmp_path / "library.json"
+    path.write_text(json.dumps(doc))
+
+    shoot = tmp_path / "shoot"
+    write_shoot(shoot, [Frame("BEAR", 0.0, 0, marker=200), Frame("HILL", 900.0, 1, marker=210)])
+    reg = ModelRegistry.fake({"maniqa": FakeManiqa({200: 0.13, 210: 0.13}), "tinyclip": TextClip({200: 0, 210: 1})})
+    settings = CullSettings(models=["maniqa"], gates=GateSettings(quality_mode="category", quality_reject=0.05,
+                                                                  quality_baseline=str(path)))
+    result = cull(shoot, settings, models=reg, cache_db=tmp_path / "c.sqlite")
+    d = {p.rsplit("/", 1)[-1]: f for p, f in result.files.items()}
+    assert d["BEAR.JPG"].decision == "keep" and d["BEAR.JPG"].categories[0] == "animals"
+    assert d["HILL.JPG"].decision == "reject"
+    assert "percentile 0.00 of" in d["HILL.JPG"].reasons[0]
+    assert "tinyclip" in result.models  # the category floor brings TinyCLIP in without "search"
+
+
+def test_tinyclip_runs_first_on_every_capture_bracket_frames_included(tmp_path):
+    from aiculler import CullSettings, cull
+
+    root = tmp_path / "shoot"
+    frames = [Frame(f"B{i}", i * 0.3, 0, bias=b, mode=2, marker=10) for i, b in enumerate((-1.0, 0.0, 1.0))]
+    frames.append(Frame("S", 600.0, 1, marker=20))
+    write_shoot(root, frames)
+    reg = ModelRegistry.fake({"tinyclip": TextClip({10: 0, 20: 1})})
+    result = cull(root, CullSettings(models=["search"]), models=reg, cache_db=tmp_path / "c.sqlite")
+    assert len(result.index["search"]["embeddings"]) == 4
+    assert all(f.categories for f in result.files.values())
+
+
+def test_calibrate_compares_modes_with_a_library(tmp_path):
+    from aiculler.baseline import LIBRARY_SCHEMA, LibraryBaseline
+    from aiculler.categories import VERSION
+
+    recs = [{"shoot": "s", "capture": f"a{i}", "maniqa": 0.10 + i / 1000, "labels": ["animals"], "techniques": []} for i in range(60)]
+    recs += [{"shoot": "s", "capture": f"l{i}", "maniqa": 0.40 + i / 1000, "labels": ["landscape"], "techniques": []} for i in range(60)]
+    lib = LibraryBaseline({"schema": LIBRARY_SCHEMA, "maniqa": "m", "tinyclip": "t", "categories_version": VERSION, "records": recs})
+    rows = [  # keeps: a low-scoring animal and a high landscape; rejects: a low landscape, a bottom animal
+        {"id": "1", "folder": "s", "scores": {"maniqa": 0.13}, "labels": ["animals"], "techniques": []},
+        {"id": "2", "folder": "s", "scores": {"maniqa": 0.45}, "labels": ["landscape"], "techniques": []},
+        {"id": "3", "folder": "s", "scores": {"maniqa": 0.20}, "labels": ["landscape"], "techniques": []},
+        {"id": "4", "folder": "s", "scores": {"maniqa": 0.101}, "labels": ["animals"], "techniques": []},
+    ]
+    cal = calibrate({"rows": rows}, {"1": "keep", "2": "keep", "3": "reject", "4": "reject"}, library=lib)
+    m = cal["modes"]
+    assert m["raw"]["rejects_caught_all_keeps_safe"] == 1  # only the bottom animal is below the low animal keep
+    assert m["category"]["rejects_caught_all_keeps_safe"] == 2  # as percentiles of their category, both fall below

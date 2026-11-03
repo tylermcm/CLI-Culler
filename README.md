@@ -38,13 +38,24 @@ models actually used (`models`) and what was skipped (`warnings`).
 frame about to be kept, lone frames included. Below `quality_reject` a frame is rejected (a lone frame too) and its
 contest, if any, moves to the next-best frame, which is scored in turn; below `quality_review` it goes to review.
 Bracket frames and frames left out of culling are never floored. `maniqa_scope: all` scores every competing frame.
-Set the levels from your own labels:
+MANIQA scores night, mist, glare and shallow depth of field low whatever their quality, so the levels can compare
+the score against similar frames instead (`gates.quality_mode`): `raw` (the score), `shoot` (its percentile in its
+own shoot), `category` (its percentile among frames of its TinyCLIP category in a library baseline) or `technique`
+(category, and category + EXIF technique: high ISO, slow shutter, long lens, wide aperture, flash). Set the mode
+and the levels from your own labels:
 
 ```bash
-ai-culler --db culler.sqlite sample /shoots/A /shoots/B /shoots/C ... --n 100 --out baseline --models ~/src/ImageTriage
+M=~/src/ImageTriage
+ai-culler --db culler.sqlite baseline /shoots/A /shoots/B ... --out library.json --models $M   # MANIQA + TinyCLIP, no labels
+ai-culler --db culler.sqlite sample /shoots/A /shoots/B ... --n 150 --baseline library.json --out baseline --models $M
 #   open baseline/label.html, mark each frame keep / borderline / reject (keys 1-3), Export labels.csv into baseline/
-ai-culler calibrate baseline --out baseline/calibration.md   # distribution per label, a sweep, suggested levels
+ai-culler calibrate baseline --baseline library.json --out baseline/calibration.md   # modes compared, suggested levels
 ```
+
+**TinyCLIP runs first** whenever anything needs it (`search`, the category floor, `preference_model`,
+`refine_scenes`): on every readable capture, bracket and burst frames included, before routing and gates. Every
+file then carries its `categories` (portrait, people, landscape, architecture, animals, macro, night, street,
+food_product, interior; multi-label) in `decisions.json` and the index; every file carries its EXIF `techniques`.
 
 **The index** (`index.npz` next to `decisions.json`, or `--index PATH`), written when `search` or `people` ran:
 TinyCLIP embeddings and faces (box, eyes, AdaFace vector, person number) per capture, with every file of each

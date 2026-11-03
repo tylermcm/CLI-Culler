@@ -19,6 +19,10 @@
     "washed_mean": 0.8,
     "washed_spread": 0.15,
     "shadows_crushed": 0.6,
+    "quality_reject": 0.0,
+    "quality_review": 0.0,
+    "quality_mode": "raw",
+    "quality_baseline": null,
     "featureless": "review"
   },
   "weights": {

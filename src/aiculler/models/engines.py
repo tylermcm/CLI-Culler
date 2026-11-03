@@ -236,6 +236,8 @@ class TinyClipEngine:
         import onnxruntime as ort
 
         self.np = np
+        self.model_dir = Path(model_dir)
+        self._tokenizer = None
         opts = ort.SessionOptions()
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         available = set(ort.get_available_providers())
@@ -264,6 +266,35 @@ class TinyClipEngine:
                 self.extra[m.name] = np.ones((1, length), dtype=np.int64)
             else:
                 raise RuntimeError(f"unsupported TinyCLIP input {m.name}")
+
+    def encode_text(self, prompt: str) -> list[float]:
+        """Unit-length ``text_embeds`` for a prompt, as the app's ``CLIPTextEncoder`` computes them: tokenizer.json
+        padded/truncated to 77 with <|endoftext|>, a blank image on the pixel input of the combined graph."""
+        np = self.np
+        if self._tokenizer is None:
+            from tokenizers import Tokenizer
+
+            tok = Tokenizer.from_file(str(self.model_dir / "tokenizer.json"))
+            pad = tok.token_to_id("<|endoftext|>")
+            tok.enable_truncation(max_length=77)
+            tok.enable_padding(length=77, pad_id=pad, pad_token="<|endoftext|>")
+            self._tokenizer = tok
+        enc = self._tokenizer.encode(prompt)
+        outputs = [m.name for m in self.session.get_outputs()]
+        name = next((n for n in outputs if n.casefold() == "text_embeds"), None)
+        if name is None:
+            raise RuntimeError("TinyCLIP model has no text_embeds output")
+        feeds = {}
+        for m in self.session.get_inputs():
+            if m.name == self.input_name:
+                feeds[m.name] = np.zeros((1, 3, self.size, self.size), dtype=np.float32)
+            elif m.name.casefold() == "input_ids":
+                feeds[m.name] = np.asarray([enc.ids], dtype=np.int64)
+            elif m.name.casefold() == "attention_mask":
+                feeds[m.name] = np.asarray([enc.attention_mask], dtype=np.int64)
+        vector = np.asarray(self.session.run([name], feeds)[0], dtype=np.float32).reshape(-1)
+        norm = float(np.linalg.norm(vector))
+        return [float(v) for v in (vector / norm if norm > 0 else vector)]
 
     def embed(self, image) -> list[float]:
         from PIL import Image

@@ -48,6 +48,9 @@ class Capture:
     featureless: bool = False  # preview holds no structure (black misfire, moon in an empty sky)
     exposure_time: float | None = None
     focal_length: float | None = None
+    f_number: float | None = None
+    iso: float | None = None
+    flash: bool | None = None
     time: float | None = None
     error: str | None = None  # primary file could not be read
     pixels: object | None = None  # bracketeering PixelStats (thumb/layout): registration for scene refinement
@@ -156,6 +159,9 @@ def ingest(
                 featureless=featureless,
                 exposure_time=shot.meta.exposure_time,
                 focal_length=shot.meta.focal_length,
+                f_number=shot.meta.f_number,
+                iso=shot.meta.iso,
+                flash=shot.meta.flash_fired,
                 time=shot.meta.capture_time,
                 error=errors.get(primary),
                 pixels=px,

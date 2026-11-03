@@ -55,15 +55,16 @@ class GateResults:
         return any(f.gate in DECISIVE for f in self.failures.get(capture) or [])
 
 
-def quality_check(maniqa: float | None, settings: "CullSettings") -> tuple[GateFailure | None, str | None]:
-    """The quality floor on a MANIQA score: (failure, review flag); both None when it passes or is unscored."""
+def quality_check(value: float | None, described: str, settings: "CullSettings") -> tuple[GateFailure | None, str | None]:
+    """The quality floor on a value (MANIQA, or its percentile: ``gates.quality_mode``): (failure, review flag); both
+    None when it passes or is unscored. ``described`` explains the value in the reason."""
     g = settings.gates
-    if maniqa is None:
+    if value is None:
         return None, None
-    if g.quality_reject > 0 and maniqa < g.quality_reject:
-        return GateFailure(QUALITY, f"below the quality floor (MANIQA {maniqa:.3f} < {g.quality_reject:g})"), None
-    if g.quality_review > 0 and maniqa < g.quality_review:
-        return None, f"low quality (MANIQA {maniqa:.3f} < {g.quality_review:g})"
+    if g.quality_reject > 0 and value < g.quality_reject:
+        return GateFailure(QUALITY, f"below the quality floor ({described} < {g.quality_reject:g})"), None
+    if g.quality_review > 0 and value < g.quality_review:
+        return None, f"low quality ({described} < {g.quality_review:g})"
     return None, None
 
 

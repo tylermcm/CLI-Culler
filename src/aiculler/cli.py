@@ -1137,16 +1137,23 @@ def command_sample(args) -> int:
     for folder in folders:
         if not folder.is_dir():
             raise SystemExit(f"ai-culler: folder not found: {folder}")
+    library = None
+    if args.baseline:
+        from aiculler.baseline import LibraryBaseline
+
+        library = LibraryBaseline.load(args.baseline)
     registry = _load_registry(args, {"maniqa"})
     try:
         doc = make_sample(folders, args.out, n=args.n, seed=args.seed, models=registry, cache_db=args.db,
-                          cache_dir=args.cache, workers=args.workers)
+                          cache_dir=args.cache, workers=args.workers, library=library)
     except (ValueError, FileNotFoundError) as exc:
         raise SystemExit(f"ai-culler: {exc}") from exc
     for w in doc["warnings"]:
         print(f"warning: {w}", file=sys.stderr)
     for folder, k in doc["per_folder"].items():
         print(f"{folder}: {k} of {doc['candidates_per_folder'][folder]} competing frames")
+    if doc["per_category"]:
+        print("by category: " + ", ".join(f"{c} {k}" for c, k in sorted(doc["per_category"].items(), key=lambda x: -x[1])))
     print(f"{doc['drawn']} frames -> {args.out / 'label.html'} (open it, label every frame, export labels.csv into {args.out})")
     return 0
 
@@ -1157,13 +1164,47 @@ def command_calibrate(args) -> int:
     sample = json.loads((args.sample / "sample.json").read_text(encoding="utf-8"))
     labels_path = args.labels or args.sample / "labels.csv"
     try:
-        cal = calibrate(sample, read_labels(labels_path), margin=args.margin, review_share=args.review_share)
+        library = None
+        if args.baseline:
+            from aiculler.baseline import LibraryBaseline
+
+            library = LibraryBaseline.load(args.baseline)
+        cal = calibrate(sample, read_labels(labels_path), margin=args.margin, review_share=args.review_share, library=library)
     except (ValueError, FileNotFoundError) as exc:
         raise SystemExit(f"ai-culler calibrate: {exc}") from exc
-    report = render_calibration(cal)
-    _write_text(args.out, report)
-    s = cal["suggested"]
-    print(f"suggested: quality_reject {s['quality_reject']}, quality_review {s['quality_review']} ({cal['labelled']} labelled frames)", file=sys.stderr)
+    _write_text(args.out, render_calibration(cal))
+    for mode, m in cal["modes"].items():
+        s = m["suggested"]
+        print(f"{mode}: quality_reject {s['quality_reject']}, quality_review {s['quality_review']}; "
+              f"rejects caught with every keep safe {m['rejects_caught_all_keeps_safe']} of {cal['rejects']}", file=sys.stderr)
+    return 0
+
+
+def command_baseline(args) -> int:
+    from aiculler.baseline import LibraryBaseline, build_library
+
+    folders = [Path(f).expanduser() for f in args.folder]
+    for folder in folders:
+        if not folder.is_dir():
+            raise SystemExit(f"ai-culler: folder not found: {folder}")
+    registry = _load_registry(args, {"maniqa", "tinyclip"})
+    last: dict[str, int] = {}
+
+    def on_progress(stage: str, done: int, total: int) -> None:
+        step = max(1, total // 10)
+        if total and (done == total or done - last.get(stage, -step) >= step):
+            last[stage] = done
+            print(f"[{stage}] {done}/{total}", file=sys.stderr)
+
+    try:
+        doc = build_library(folders, registry, cache_db=args.db, cache_dir=args.cache, workers=args.workers, progress=on_progress)
+    except ValueError as exc:
+        raise SystemExit(f"ai-culler baseline: {exc}") from exc
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(doc) + "\n", encoding="utf-8")
+    lib = LibraryBaseline(doc)
+    print(f"{len(doc['records'])} frames from {len(folders)} shoots -> {args.out}")
+    print("frames per category: " + ", ".join(f"{k} {v}" for k, v in lib.summary().items() if "+" not in k))
     return 0
 
 
@@ -1413,6 +1454,7 @@ def build_parser() -> argparse.ArgumentParser:
     sample_cmd.add_argument("--models", default="auto", help="Where the app's models are (as for cull); MANIQA scores the sample")
     sample_cmd.add_argument("--device", default="auto")
     sample_cmd.add_argument("--workers", type=int)
+    sample_cmd.add_argument("--baseline", type=Path, help="Library baseline (ai-culler baseline): spread the draw evenly across categories")
     sample_cmd.set_defaults(func=command_sample)
 
     calibrate_cmd = subparsers.add_parser("calibrate", help="Suggest quality floor levels from a labelled sample")
@@ -1421,7 +1463,17 @@ def build_parser() -> argparse.ArgumentParser:
     calibrate_cmd.add_argument("--margin", type=float, default=0.02, help="quality_reject sits this far below the lowest keep/borderline")
     calibrate_cmd.add_argument("--review-share", type=float, default=0.10, help="At most this share of keeps below quality_review")
     calibrate_cmd.add_argument("--out", type=Path, help="calibration.md path (default: stdout)")
+    calibrate_cmd.add_argument("--baseline", type=Path, help="Library baseline: also compare the shoot, category and technique modes")
     calibrate_cmd.set_defaults(func=command_calibrate)
+
+    baseline_cmd = subparsers.add_parser("baseline", help="Build a library baseline: MANIQA per category across many shoots (no labels)")
+    baseline_cmd.add_argument("folder", type=Path, nargs="+", help="Shoot folders (each one shoot)")
+    baseline_cmd.add_argument("--out", type=Path, default=Path("library_baseline.json"))
+    baseline_cmd.add_argument("--cache", type=Path, help="Preview cache directory (default: next to --db)")
+    baseline_cmd.add_argument("--models", default="auto", help="Where the app's models are (as for cull)")
+    baseline_cmd.add_argument("--device", default="auto")
+    baseline_cmd.add_argument("--workers", type=int)
+    baseline_cmd.set_defaults(func=command_baseline)
 
     learn_cmd = subparsers.add_parser("learn", help="Train a preference model (TinyCLIP) from your past culls")
     learn_cmd.add_argument("folder", type=Path, nargs="+", help="Shoot folders with past culls (each one shoot)")
