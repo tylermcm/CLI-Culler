@@ -34,6 +34,18 @@ most of the work. Models are optional extras, each asked for by name with `--wit
 model you asked for that is missing or fails to load is skipped with a warning; `decisions.json` lists the
 models actually used (`models`) and what was skipped (`warnings`).
 
+**Quality floor** (needs `--with maniqa`; `gates.quality_reject`, `gates.quality_review`): MANIQA scores every
+frame about to be kept, lone frames included. Below `quality_reject` a frame is rejected (a lone frame too) and its
+contest, if any, moves to the next-best frame, which is scored in turn; below `quality_review` it goes to review.
+Bracket frames and frames left out of culling are never floored. `maniqa_scope: all` scores every competing frame.
+Set the levels from your own labels:
+
+```bash
+ai-culler --db culler.sqlite sample /shoots/A /shoots/B /shoots/C ... --n 100 --out baseline --models ~/src/ImageTriage
+#   open baseline/label.html, mark each frame keep / borderline / reject (keys 1-3), Export labels.csv into baseline/
+ai-culler calibrate baseline --out baseline/calibration.md   # distribution per label, a sweep, suggested levels
+```
+
 **The index** (`index.npz` next to `decisions.json`, or `--index PATH`), written when `search` or `people` ran:
 TinyCLIP embeddings and faces (box, eyes, AdaFace vector, person number) per capture, with every file of each
 capture, for the app's semantic and people search (`aiculler.outputs.load_index`; arrays documented in

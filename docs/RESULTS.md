@@ -82,3 +82,26 @@ recall 75% → 65% (moving brackets keep one frame). The default stays 2. What t
 
 Lone frames that pass every gate are kept because nothing competes with them ("reject only clear failures"):
 they bound precision. See DEFERRED §4.
+
+## Quality floor: MANIQA on every competing frame (four shoots)
+
+`maniqa_scope: all`, no floor applied: MANIQA on every competing frame (China 825, Alaska 1,002, Japan 358,
+WhiteSands 729; 1–4 min per shoot on the V100). Distribution, and where your own culls sit in it:
+
+| | n | min | p5 | p10 | median |
+|---|---|---|---|---|---|
+| China 8-26, all | 825 | 0.088 | 0.209 | 0.247 | 0.395 |
+| China 8-26, final picks | 18 | 0.288 | | 0.316 | 0.406 |
+| China 8-26, ImageTriage keeps | 29 | 0.228 | 0.240 | 0.247 | 0.388 |
+| China 8-26, ImageTriage rejects | 216 | 0.184 | 0.212 | 0.243 | 0.374 |
+| Alaska Aug '21, all | 1,002 | 0.115 | 0.222 | 0.258 | 0.355 |
+| Alaska Aug '21, picks | 12 | 0.337 | | 0.338 | 0.368 |
+| Japan 4-24, all | 358 | 0.095 | 0.218 | 0.277 | 0.389 |
+| WhiteSands '26, all | 729 | 0.062 | 0.262 | 0.312 | 0.450 |
+
+**Reading.** Keeps and rejects overlap almost completely above ~0.23: MANIQA cannot choose between good frames.
+Below, it finds real junk (blurred photos of a screen, a dark out-of-focus interior, an accidental tilted frame),
+but also good frames it dislikes for their content: sharp bear close-ups against water glare (DSC_9398, 0.145;
+DSC_9815, 0.184), a night portrait (_DSC1739, 0.133), mist (_DSC1694, 0.195), the torii path (DSC_6945, 0.177).
+No absolute reject level from these four shoots is safe, so both levels default to off; set them from a
+labelled baseline (`ai-culler sample` / `calibrate`).

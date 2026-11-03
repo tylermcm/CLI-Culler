@@ -54,3 +54,16 @@ Each has a regression test or a measurement to re-check against.
   means rejecting some frames that failed nothing, by one of: an absolute quality floor (needs a model: MANIQA or
   Q-ReAlign, so only with `--with`); sending weak lone frames to review instead of keep; or a keep budget per
   shoot (compares across the shoot, against the first rule). None is implemented.
+
+- **Since:** the quality floor is implemented (`gates.quality_reject` / `quality_review`, MANIQA on every frame
+  about to be kept), off by default: MANIQA's low end mixes junk with good dark, misty or glare-lit frames
+  (RESULTS.md). Next: the photographer's labelled baseline (about 100 frames across 5–10 shoots, `ai-culler
+  sample`), then `ai-culler calibrate` for the levels.
+
+## 5. MANIQA judges content, not only quality
+
+- **What:** it scores night scenes, mist, shallow depth of field and water glare low however sharp the frame is
+  (Alaska's bear close-ups at 0.145–0.19, under China's lowest ImageTriage keep, 0.228).
+- **Options after the baseline:** floor only when MANIQA is low *and* the frame is soft (as the blur gate already
+  pairs MANIQA with sharpness), so sharp frames MANIQA dislikes go to review at most; or a floor relative to the
+  shoot's own MANIQA distribution. `sample.json` keeps the sharpness of every sampled frame for this.
