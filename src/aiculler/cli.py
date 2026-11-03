@@ -1034,9 +1034,11 @@ def command_evaluate(args) -> int:
         args.metrics_out.write_text(json.dumps(ev.summary, indent=2) + "\n", encoding="utf-8")
     s = ev.summary
     precision = "n/a (picks)" if s["mode"] == "picks" else s["precision"]
+    kept_gated = len(s.get("gates_vs_kept", {}).get("gated", []))
     print(
         f"recall {s['recall']}, precision {precision}, keep rate {s['engine_keep_rate']}, review rate {s['review_rate']}, "
         f"burst hit rate {s['sets']['burst']['hit_rate']}, scene hit rate {s['sets']['scene']['hit_rate']}"
+        + f", {kept_gated} {'picked' if s['mode'] == 'picks' else 'kept'} frame(s) rejected by a gate"
         + (f" -> {args.out}" if args.out else ""),
         file=sys.stderr,
     )

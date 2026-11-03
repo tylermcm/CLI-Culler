@@ -132,3 +132,44 @@ def test_cli_expands_quoted_tilde_and_rejects_missing_or_empty_folders(shoot, tm
     with pytest.raises(SystemExit, match="no image files found"):
         main(["--no-log", "--db", db, "cull", str(empty), "--out", str(tmp_path / "y.json"), "--quiet"])
     assert not (tmp_path / "x.json").exists() and not (tmp_path / "y.json").exists()
+
+
+def test_gated_pick_is_reported_with_its_margins(tmp_path):
+    shoot = tmp_path / "shoot"
+    frames = [
+        Frame("DSC_0001", 0.0, 1, blown_sky=0.4),  # the pick: sky blown, sharp
+        Frame("DSC_0002", 4.0, 1, blur=1.5),
+        Frame("DSC_0003", 300.0, 2),  # unrelated pick, fine
+    ]
+    paths = write_shoot(shoot, frames)
+    winners = shoot / "_winners"
+    winners.mkdir()
+    for name in ("DSC_0001", "DSC_0003"):
+        shutil.copy2(paths[name], winners / f"{name}.JPG")
+    report, metrics = tmp_path / "report.md", tmp_path / "metrics.json"
+    assert main([
+        "--no-log", "--db", str(tmp_path / "c.sqlite"), "evaluate", str(shoot), "--quiet",
+        "--out", str(report), "--metrics-out", str(metrics),
+    ]) == 0
+    g = json.loads(metrics.read_text())["gates_vs_kept"]
+    gated = {x["file"]: x for x in g["gated"]}
+    assert set(gated) == {"DSC_0001.JPG"} and "sky_blown" in gated["DSC_0001.JPG"]["gates"]
+    assert gated["DSC_0001.JPG"]["top_clip"] > 0.95
+    assert g["metrics"]["sky_blown"]["passes"] is False
+    text = report.read_text()
+    assert "Rejected by a gate: **1**" in text
+
+    # Loosening the threshold (as the margins table suggests) lets the pick through.
+    settings = tmp_path / "s.json"
+    settings.write_text(json.dumps({"gates": {"sky_blown": 1.01, "clip_region_reject": 0.5}}))
+    assert main([
+        "--no-log", "--db", str(tmp_path / "c.sqlite"), "evaluate", str(shoot), "--quiet", "--settings", str(settings),
+        "--metrics-out", str(metrics), "--out", str(report),
+    ]) == 0
+    assert json.loads(metrics.read_text())["gates_vs_kept"]["gated"] == []
+
+
+def test_example_settings_file_loads():
+    from pathlib import Path
+
+    CullSettings.from_json(Path(__file__).resolve().parent.parent / "cull_settings.example.json")

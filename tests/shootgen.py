@@ -23,7 +23,7 @@ class Frame:
     exposure: tuple[int, int] = (1, 250)
     bias: float = 0.0  # exposure compensation, EV
     mode: int = 0  # EXIF ExposureMode: 0 auto, 1 manual, 2 auto bracket
-    sidecar: bool = False  # also write NAME.xmp-less JPEG copy? (see write_copy)
+    blown_sky: float = 0.0  # paint this fraction of the frame's height, from the top, pure white
 
 
 def render(scene: int, size=(480, 320)):
@@ -63,6 +63,10 @@ def jpeg_bytes(frame: Frame) -> bytes:
         im = im.filter(ImageFilter.GaussianBlur(frame.blur))
     if frame.gain != 1.0:
         im = im.point(lambda p: max(0, min(255, int(p * frame.gain))))
+    if frame.blown_sky:
+        from PIL import ImageDraw
+
+        ImageDraw.Draw(im).rectangle([0, 0, im.width, int(im.height * frame.blown_sky)], fill=(255, 255, 255))
     whole = int(frame.second)
     sub = int(round((frame.second - whole) * 100))
     exif = Image.Exif()

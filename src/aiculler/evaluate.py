@@ -44,6 +44,8 @@ class CaptureRow:
     truth: Truth | None = None
     kept: bool = False
     excluded: str | None = None  # why it is left out of the metrics
+    gates: list[str] = field(default_factory=list)  # gates the capture failed (decisions.json)
+    scores: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -92,6 +94,7 @@ def evaluate(
         row.files.append(path)
         if d["primary"]:
             row.primary, row.decision, row.score, row.reasons = path, d["decision"], d["score"], d["reasons"]
+            row.gates, row.scores = list(d.get("gates") or []), dict(d.get("scores") or {})
     matched = 0
     for row in caps.values():
         ts = [truth.truth[f] for f in row.files if f in truth.truth]
@@ -122,6 +125,7 @@ def evaluate(
 
     summary = _summary(scored, sets, truth.mode)
     summary["excluded"] = len(rows) - len(scored)
+    summary["gates_vs_kept"] = gate_margins(scored, decisions.get("settings", {}).get("gates", {}))
     return Evaluation(
         rows, sets, keep_min_rating, truth.source, truth.mode, truth.unlabelled, list(truth.notes),
         dict(decisions.get("timings", {})), matched, summary,
@@ -198,6 +202,57 @@ def _summary(rows: list[CaptureRow], sets: list[SetResult], mode: str) -> dict:
     }
 
 
+# --------------------------------------------------------------------------- gates vs the user's keeps
+
+# (gate, metric, direction): "max" = rejects at or above the threshold, "min" = below it.
+GATE_METRICS = [
+    ("clip_region", "clip_region", "clip_region_reject", "max"),
+    ("sky_blown", "top_clip", "sky_blown", "max"),
+    ("shadows", "shadows_crushed", "shadows_crushed", "max"),
+    ("black", "preview_mean", "black_mean", "min"),
+]
+
+
+def gate_margins(rows: list[CaptureRow], gates: dict) -> dict:
+    """For the frames the user kept: which a gate rejects, and how close the others come to each threshold.
+
+    Only frames the gates look at (bursts and singles; never bracket frames) and that have the measurement.
+    """
+    kept = [r for r in rows if r.kept and r.kind != "exposure"]
+    out: dict = {"kept_checked": 0, "gated": [], "metrics": {}}
+    measured = [r for r in kept if r.scores]
+    out["kept_checked"] = len(measured)
+    out["gated"] = [
+        {"file": Path(r.primary).name, "decision": r.decision, "gates": r.gates,
+         **{k: r.scores.get(k) for k in ("clip_region", "top_clip", "luma_mean", "luma_spread", "preview_mean", "shadows_crushed")}}
+        for r in measured if r.gates
+    ]
+    for gate, metric, setting, direction in GATE_METRICS:
+        vals = [(r.scores[metric], r) for r in measured if r.scores.get(metric) is not None]
+        threshold = gates.get(setting)
+        if not vals or threshold is None:
+            continue
+        value, r = max(vals, key=lambda x: x[0]) if direction == "max" else min(vals, key=lambda x: x[0])
+        passes = value < threshold if direction == "max" else value >= threshold
+        out["metrics"][gate] = {"setting": setting, "threshold": threshold, "worst": value, "file": Path(r.primary).name, "passes": passes}
+    if gates.get("washed_mean") is not None and gates.get("washed_spread") is not None:
+        vals = [r for r in measured if r.scores.get("luma_mean") is not None and r.scores.get("luma_spread") is not None]
+        if vals:
+            # Washed out needs both: margin = how far the frame is from meeting either condition.
+            def margin(r: CaptureRow) -> float:
+                return max(gates["washed_mean"] - r.scores["luma_mean"], r.scores["luma_spread"] - gates["washed_spread"])
+
+            r = min(vals, key=margin)
+            out["metrics"]["washed_out"] = {
+                "setting": "washed_mean / washed_spread",
+                "threshold": f"{gates['washed_mean']:g} / {gates['washed_spread']:g}",
+                "worst": f"{r.scores['luma_mean']:.2f} / {r.scores['luma_spread']:.2f}",
+                "file": Path(r.primary).name,
+                "passes": margin(r) > 0,
+            }
+    return out
+
+
 # --------------------------------------------------------------------------- report
 
 
@@ -264,6 +319,7 @@ def render_report(ev: Evaluation, *, shoot: str = "", worst: int = 25) -> str:
         lines.append(
             f"| {kind} | {k['captures']} | {k['user_kept']} | {k['engine_kept']} | {_pct(k['precision'], picks)} | {_pct(k['recall'])} | {k['review']} |"
         )
+    lines += _gate_section(s.get("gates_vs_kept") or {}, kept_word)
     if ev.timings:
         lines += ["", "## Runtime per stage", "", "| Stage | Seconds |", "|---|---|"]
         lines += [f"| {k} | {v:.2f} |" for k, v in ev.timings.items()]
@@ -290,6 +346,32 @@ def render_report(ev: Evaluation, *, shoot: str = "", worst: int = 25) -> str:
             lines.append(f"\n…and {len(left_out) - worst} more.")
     lines.append("")
     return "\n".join(lines)
+
+
+def _fmt(v) -> str:
+    if v is None:
+        return "–"
+    return f"{v:.0%}" if isinstance(v, float) and v <= 1 else str(v)
+
+
+def _gate_section(g: dict, kept_word: str) -> list[str]:
+    if not g:
+        return []
+    out = ["", f"## Gates vs your {kept_word} frames", ""]
+    gated = g.get("gated", [])
+    out.append(f"{kept_word.capitalize()} frames checked: {g.get('kept_checked', 0)} (bursts and singles; bracket frames are never gated). "
+               f"Rejected by a gate: **{len(gated)}**.")
+    if gated:
+        out += ["", "| File | Engine | Gates | Largest region | Top third | Mean | Spread |", "|---|---|---|---|---|---|---|"]
+        for x in gated:
+            out.append(f"| {x['file']} | {x['decision']} | {', '.join(x['gates'])} | {_fmt(x['clip_region'])} | {_fmt(x['top_clip'])} | "
+                       f"{_fmt(x['luma_mean'])} | {_fmt(x['luma_spread'])} |")
+    metrics = g.get("metrics", {})
+    if metrics:
+        out += ["", f"Closest {kept_word} frame to each threshold:", "", "| Gate | Setting | Threshold | Closest frame | Value | Passes |", "|---|---|---|---|---|---|"]
+        for gate, m in metrics.items():
+            out.append(f"| {gate} | `{m['setting']}` | {_fmt(m['threshold'])} | {m['file']} | {_fmt(m['worst'])} | {'yes' if m['passes'] else '**no**'} |")
+    return out
 
 
 def _disagreements(title: str, rows: list[CaptureRow], limit: int) -> list[str]:

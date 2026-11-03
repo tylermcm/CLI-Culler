@@ -248,3 +248,32 @@ def test_xmp_reads_imagetriage_fields():
         "<rdf:li>keep</rdf:li></rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta>"
     )
     assert t.kept(3) and t.tags == ("keep",)
+
+
+def test_report_lists_picks_the_gates_reject_and_their_margins():
+    gates = {"clip_region_reject": 0.25, "sky_blown": 0.6, "shadows_crushed": 0.6, "black_mean": 0.02,
+             "washed_mean": 0.8, "washed_spread": 0.15}
+    files = {
+        "/s/a/p1.NEF": {**_file("c1", "S1", "single", 1, "reject"), "gates": ["sky_blown"],
+                        "scores": {"clip_region": 0.2, "top_clip": 0.7, "luma_mean": 0.6, "luma_spread": 0.5,
+                                   "preview_mean": 0.6, "shadows_crushed": 0.01}},
+        "/s/_winners/p1.NEF": _file("c1", "S1", "single", 1, "reject", primary=False),
+        "/s/a/p2.NEF": {**_file("c2", "S2", "single", 2, "keep"), "gates": [],
+                        "scores": {"clip_region": 0.1, "top_clip": 0.2, "luma_mean": 0.78, "luma_spread": 0.16,
+                                   "preview_mean": 0.03, "shadows_crushed": 0.3}},
+        "/s/_winners/p2.NEF": _file("c2", "S2", "single", 2, "keep", primary=False),
+        "/s/a/x.NEF": {**_file("c3", "S3", "single", 3, "reject"), "gates": ["clip_region"],
+                       "scores": {"clip_region": 0.9}},  # not picked: not listed
+    }
+    doc = {"files": files, "settings": {"gates": gates}}
+    ev = evaluate(doc, load_truth("picks", doc))
+    g = ev.summary["gates_vs_kept"]
+    assert g["kept_checked"] == 2 and [x["file"] for x in g["gated"]] == ["p1.NEF"]
+    m = g["metrics"]
+    assert m["sky_blown"] == {"setting": "sky_blown", "threshold": 0.6, "worst": 0.7, "file": "p1.NEF", "passes": False}
+    assert m["clip_region"]["worst"] == 0.2 and m["clip_region"]["passes"]
+    assert m["black"]["file"] == "p2.NEF" and m["black"]["passes"]
+    assert m["washed_out"]["file"] == "p2.NEF" and m["washed_out"]["passes"]
+    report = render_report(ev)
+    assert "## Gates vs your picked frames" in report and "Rejected by a gate: **1**" in report
+    assert "| sky_blown | `sky_blown` | 60% | p1.NEF | 70% | **no** |" in report
