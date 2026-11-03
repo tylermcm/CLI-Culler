@@ -1,0 +1,23 @@
+{
+  "brackets": "keep_set",
+  "bursts_keep": 2,
+  "scene_keep": 1,
+  "focus_stacks": "keep_all",
+  "timelapses": "keep_all",
+  "review_below": 0.7,
+  "require_eyes_open": true,
+  "keep_people_coverage": true,
+  "gates": {
+    "black_mean": 0.02,
+    "highlights_clipped": 0.25,
+    "shadows_crushed": 0.6,
+    "featureless": "review"
+  },
+  "weights": {
+    "sharpness": 0.6,
+    "exposure": 0.4
+  },
+  "normalise": "relative",
+  "backend": "auto",
+  "exclude": []
+}
