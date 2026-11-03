@@ -95,3 +95,24 @@ def test_cli_cull_and_evaluate(shoot, tmp_path):
     assert "# Cull evaluation" in text and "| burst | 1 | 1 | 1 | 100.0% |" in text
     m = json.loads(metrics.read_text())
     assert m["user_kept"] == 1 and m["recall"] == 1.0
+
+
+def test_evaluate_picks_end_to_end(tmp_path):
+    shoot = tmp_path / "China 8-26"
+    frames = burst("DSC_", 1, 0.0, 4, scene=0, blurs=[2.0, 0.0, 1.0, 3.0]) + [Frame("DSC_0010", 60.0, 1), Frame("DSC_0011", 63.0, 1, blur=2.5)]
+    paths = write_shoot(shoot, frames)
+    winners = tmp_path / "_winners"  # outside the shoot folder: passed as a second folder
+    winners.mkdir()
+    shutil.copy2(paths["DSC_0002"], winners / "DSC_0002.JPG")  # engine should keep it (sharpest)
+    shutil.copy2(paths["DSC_0011"], winners / "DSC_0011.JPG")  # engine will reject it (blurred twin)
+    report = tmp_path / "report.md"
+    metrics = tmp_path / "metrics.json"
+    assert main([
+        "--no-log", "--db", str(tmp_path / "c.sqlite"), "evaluate", str(shoot), str(winners), "--quiet",
+        "--decisions", str(tmp_path / "decisions.json"), "--out", str(report), "--metrics-out", str(metrics),
+    ]) == 0  # --truth picks is the default
+    m = json.loads(metrics.read_text())
+    assert m["mode"] == "picks" and m["user_kept"] == 2 and m["recall"] == 0.5 and m["precision"] is None
+    assert m["sets"]["burst"]["hit_rate"] == 1.0 and m["sets"]["scene"]["hit_rate"] == 0.0
+    text = report.read_text()
+    assert "_winners/ (2)" in text and "DSC_0011.JPG | reject | picked (copy in _winners/)" in text

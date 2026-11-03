@@ -9,15 +9,24 @@ sets. The full design is in bracketeering's `docs/CULLING_ENGINE_SPEC.md`.
 
 ## Culling a shoot (milestone 1)
 
-```powershell
+```bash
 python -m pip install -e .
-ai-culler --db .\culler.sqlite cull D:\Shoots\Alaska --settings .\cull_settings.example.json --out .\decisions.json
-ai-culler --db .\culler.sqlite evaluate D:\Shoots\Alaska --truth .\Alaska-copy.lrcat --decisions .\decisions.json --out .\report.md
+ai-culler --db culler.sqlite cull "/shoots/China 8-26" --out decisions.json
+ai-culler --db culler.sqlite evaluate "/shoots/China 8-26" --truth picks --decisions decisions.json --out report.md
 ```
 
-- `--truth xmp` reads Lightroom ratings and labels from XMP sidecars (or XMP embedded in JPEG/TIFF/DNG).
-  Lightroom does not write pick/reject flags to XMP; use a **copy** of the `.lrcat` for flags (opened read-only).
-- A capture counts as kept when it is picked, carries an accept label, or is rated ≥ 3★ (`--keep-min-rating`).
+`evaluate --truth` sources (each capture's truth is the union over its files):
+
+| Source | Kept | Metrics |
+|---|---|---|
+| `picks` (default) | bracketeering merged a copy or edited export of the capture from another folder (`_winners/`, `Bears/`, `Re-edits/`); JPEG sidecars in the shot's own folder don't count | Recall of picks and per-set agreement; precision is not meaningful (frames kept but never exported count as not picked) |
+| `csv --truth-file f.csv` | `label` keep in a `filename,label` CSV, as written by `review-session`; unlabelled captures are left out | Full: precision, recall, agreement |
+| `triage` | ImageTriage Winner or Keep, Reject = rejected; read-only from its `decisions.sqlite3` (Linux `~/.local/share/Image Triage/Image Triage/`), then its XMP sidecars | Full; unlabelled left out |
+| `xmp`, `lrcat --truth-file copy.lrcat` | ratings ≥ 3★, accept labels, Lightroom picks | Full; unrated = not kept |
+
+- Pick/export folders must be scanned to be found: if they sit outside the shoot folder, pass them too
+  (`evaluate SHOOT _winners Bears ...`). Exports bracketeering can't match to an original are listed and left out.
+- `--unlabelled exclude|not-kept` overrides how unlabelled captures count; `--triage-session` picks an ImageTriage profile.
 - Install exiftool for the most accurate grouping (`--backend exiftool`; `auto` uses it when found).
 - Scores are cached in `--db` by capture identity and scorer revision; re-running with new settings
   recomputes nothing. Decoded previews are cached next to it (`--cache` to move them).

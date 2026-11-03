@@ -970,7 +970,7 @@ def _run_cull(args, logger: RunLogger | None = None):
             print(f"[{stage}] {done}/{total}", file=sys.stderr)
 
     result = cull(
-        args.folder,
+        list(args.folder),
         settings,
         cache_db=args.db,
         cache_dir=args.cache,
@@ -1008,16 +1008,26 @@ def command_evaluate(args) -> int:
         if args.decisions:
             write_decisions(result, args.decisions)
         decisions = decisions_document(result)
-    truth, source = load_truth(args.truth, list(decisions["files"]))
-    ev = evaluate(decisions, truth, keep_min_rating=args.keep_min_rating, truth_source=source)
-    report = render_report(ev, shoot=str(args.folder), worst=args.worst)
+    try:
+        truth = load_truth(
+            args.truth,
+            decisions,
+            truth_file=args.truth_file,
+            session=args.triage_session,
+            unlabelled=None if args.unlabelled == "auto" else args.unlabelled,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"evaluate: {exc}") from exc
+    ev = evaluate(decisions, truth, keep_min_rating=args.keep_min_rating)
+    report = render_report(ev, shoot=", ".join(str(f) for f in args.folder), worst=args.worst)
     _write_text(args.out, report)
     if args.metrics_out:
         args.metrics_out.parent.mkdir(parents=True, exist_ok=True)
         args.metrics_out.write_text(json.dumps(ev.summary, indent=2) + "\n", encoding="utf-8")
     s = ev.summary
+    precision = "n/a (picks)" if s["mode"] == "picks" else s["precision"]
     print(
-        f"precision {s['precision']}, recall {s['recall']}, review rate {s['review_rate']}, "
+        f"recall {s['recall']}, precision {precision}, keep rate {s['engine_keep_rate']}, review rate {s['review_rate']}, "
         f"burst hit rate {s['sets']['burst']['hit_rate']}, scene hit rate {s['sets']['scene']['hit_rate']}"
         + (f" -> {args.out}" if args.out else ""),
         file=sys.stderr,
@@ -1207,7 +1217,7 @@ def build_parser() -> argparse.ArgumentParser:
     stage.set_defaults(func=command_stage)
 
     def add_cull_args(p) -> None:
-        p.add_argument("folder", type=Path, help="Shoot folder")
+        p.add_argument("folder", type=Path, nargs="+", help="Shoot folder(s); include pick/export folders that live outside the shoot")
         p.add_argument("--settings", type=Path, help="CullSettings JSON (defaults if omitted)")
         p.add_argument("--cache", type=Path, help="Preview cache directory (default: next to --db)")
         p.add_argument("--backend", choices=["auto", "exiftool", "native"], help="bracketeering metadata backend")
@@ -1220,9 +1230,22 @@ def build_parser() -> argparse.ArgumentParser:
     cull_cmd.add_argument("--out", type=Path, default=Path("decisions.json"), help="decisions.json path")
     cull_cmd.set_defaults(func=command_cull)
 
-    evaluate_cmd = subparsers.add_parser("evaluate", help="Report agreement with the shoot's Lightroom ratings")
+    evaluate_cmd = subparsers.add_parser("evaluate", help="Report agreement with your own culls (picks, CSV, ImageTriage, XMP)")
     add_cull_args(evaluate_cmd)
-    evaluate_cmd.add_argument("--truth", required=True, help="'xmp' or a read-only copy of a Lightroom .lrcat")
+    evaluate_cmd.add_argument(
+        "--truth",
+        default="picks",
+        help="picks (default: copies/exports in other folders are final picks), csv, triage (ImageTriage decisions), "
+        "xmp, lrcat; or a .csv / .lrcat / ImageTriage decisions.sqlite3 path",
+    )
+    evaluate_cmd.add_argument("--truth-file", help="File for --truth csv / lrcat; for triage, a decisions.sqlite3 other than the default")
+    evaluate_cmd.add_argument("--triage-session", help="ImageTriage session (profile preset); default: the one with most rows for this shoot")
+    evaluate_cmd.add_argument(
+        "--unlabelled",
+        choices=["auto", "not-kept", "exclude"],
+        default="auto",
+        help="How captures without a label count (auto: excluded for csv/triage, not kept otherwise)",
+    )
     evaluate_cmd.add_argument("--decisions", type=Path, help="Existing decisions.json to evaluate (else cull runs, and writes it here if given)")
     evaluate_cmd.add_argument("--rerun", action="store_true", help="Re-run cull even if --decisions exists")
     evaluate_cmd.add_argument("--keep-min-rating", type=int, default=3, help="Stars at or above which a frame counts as kept")
