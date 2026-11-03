@@ -18,3 +18,29 @@ and lost `_DSC1115` to a burst MANIQA rated higher. The other contest misses (DS
 _DSC1088) are frames the user preferred to a technically better neighbour; MANIQA and face sharpness agree with
 whole-frame sharpness against the pick. Choosing a moment over a sharper twin is what the appeal stage
 (Q-ReAlign) is for. Of 1,137 captures, 836 are candidates, 615 contested; MANIQA ran on 617 (0.34 s/frame).
+
+## Four shoots (the bracketeering review shoots), no models vs faces + MANIQA
+
+Truth: China 8-26 has two (18 final picks in `_winners/`; 246 ImageTriage decisions in its XMP sidecars, 29
+accepted / 217 rejected, so precision is measurable there). Alaska Aug '21: 20 picks in `Bears/`, `Re-edits/`,
+`Eagles/` (its card folders and `Tyler's photos/` are copies, not picks). Japan 4-24 and WhiteSands '26 have no
+truth: only the engine's own rates are reported.
+
+| Shoot | Truth | Run | Recall | Keep or review | Precision | Bursts | Scenes | Keep rate | Review rate |
+|---|---|---|---|---|---|---|---|---|---|
+| China 8-26 | picks (18) | none | 72.2% | 72.2% | n/a | 2/2 | 5/9 | 39.2% | 5.7% |
+| | | faces + MANIQA | 66.7% | 66.7% | n/a | 2/2 | 4/9 | 39.4% | 5.7% |
+| China 8-26 | ImageTriage (29 of 246) | none | 72.4% | 72.4% | 18.3% | 2/5 | 4/8 | 46.8% | 0% |
+| | | faces + MANIQA | 72.4% | 72.4% | 18.4% | 2/5 | 5/8 | 46.3% | 0% |
+| Alaska Aug '21 | picks (20) | none | 5.0% | **100%** | n/a | – | 0/3 | 36.5% | **35.9%** |
+| | | faces + MANIQA | 5.0% | **100%** | n/a | – | 0/3 | 36.6% | **35.9%** |
+| Japan 4-24 | – | either | – | – | – | – | – | 66.7% | 17.0% |
+| WhiteSands '26 | – | either | – | – | – | – | – | 43.0% | 11.3% |
+
+Runtime with faces + MANIQA (first run; cached after): Alaska 7 min for 2,707 captures (517 contested), WhiteSands
+5 min (580), Japan 2 min (126), China 2.5 min (617).
+
+**Reading.** Faces and MANIQA move one or two frames per shoot either way: no measurable gain yet. Where the engine
+misses on China it is choosing a technically better neighbour over the moment the user chose (Q-ReAlign's job).
+On Alaska no pick was rejected: 19 of 20 went to review, because every pick is a frame of a camera auto-bracket
+(wildlife shot with bracketing on) carrying a "partial bracket" warning; see `DEFERRED.md` §2-3.
