@@ -955,6 +955,24 @@ def _load_cull_settings(args):
     return settings
 
 
+def _load_registry(args):
+    from aiculler.models.registry import ModelRegistry, ModelUnavailable
+
+    choice = (args.models or "auto").strip()
+    if choice.casefold() == "none":
+        return None
+    try:
+        registry = ModelRegistry.from_app_manifest(None if choice.casefold() == "auto" else choice, device=args.device)
+    except ModelUnavailable as exc:
+        if choice.casefold() == "auto":
+            print(f"models: none ({exc})", file=sys.stderr)
+            return None
+        raise SystemExit(f"ai-culler: {exc}") from exc
+    for key, problem in registry.problems().items():
+        print(f"models: {key} not available: {problem}", file=sys.stderr)
+    return registry
+
+
 def _run_cull(args, logger: RunLogger | None = None):
     from aiculler.api import cull
 
@@ -974,10 +992,12 @@ def _run_cull(args, logger: RunLogger | None = None):
             last[stage] = done
             print(f"[{stage}] {done}/{total}", file=sys.stderr)
 
+    registry = _load_registry(args)
     try:
         result = cull(
             folders,
             settings,
+            models=registry,
             cache_db=args.db,
             cache_dir=args.cache,
             on_progress=on_progress,
@@ -985,6 +1005,11 @@ def _run_cull(args, logger: RunLogger | None = None):
         )
     except (ValueError, FileNotFoundError) as exc:
         raise SystemExit(f"ai-culler: {exc}") from exc
+    if not args.quiet:
+        if result.models:
+            print("models used: " + ", ".join(f"{k} ({v})" for k, v in result.models.items()), file=sys.stderr)
+        for w in result.warnings:
+            print(f"warning: {w}", file=sys.stderr)
     if logger is not None:
         logger.event("cull_summary", {"summary": result.summary, "timings": result.timings, "stats": result.stats})
     return result
@@ -1234,6 +1259,13 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--exclude", action="append", default=[], help="Folder name to skip; repeat for several")
         p.add_argument("--workers", type=int)
         p.add_argument("--quiet", action="store_true", help="No progress output")
+        p.add_argument(
+            "--models",
+            default="auto",
+            help="Where the app's models are: 'auto' (the installed image-triage app), a path to the app "
+            "(its folder or ai_manifest.py), or 'none' (no models: exposure, sharpness and clipping only)",
+        )
+        p.add_argument("--device", default="auto", help="Model device: auto, cpu or cuda")
 
     cull_cmd = subparsers.add_parser("cull", help="Cull a shoot: keep / reject / review per file, with reasons")
     add_cull_args(cull_cmd)

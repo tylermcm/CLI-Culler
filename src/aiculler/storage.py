@@ -469,6 +469,15 @@ class ScoreCache:
         with self.lock:
             self.connection.executemany(
                 "INSERT OR REPLACE INTO scores (capture, scorer, revision, value_json) VALUES (?, ?, ?, ?)",
-                [(c, s, r, json.dumps(v, sort_keys=True)) for c, s, r, v in rows],
+                [(c, s, r, json.dumps(v, sort_keys=True, default=_plain)) for c, s, r, v in rows],
             )
             self.connection.commit()
+
+
+def _plain(value):
+    """numpy scalars and arrays (from model engines) as plain JSON values."""
+    if hasattr(value, "tolist"):
+        return value.tolist()
+    if hasattr(value, "item"):
+        return value.item()
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")

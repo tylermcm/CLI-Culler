@@ -25,6 +25,7 @@ def decisions_document(result: "CullResult") -> dict:
         "summary": result.summary,
         "timings": dict(result.timings),
         "stats": dict(result.stats),
+        "warnings": list(result.warnings),
         "files": files,
     }
 

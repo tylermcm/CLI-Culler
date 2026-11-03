@@ -50,6 +50,8 @@ class Capture:
     focal_length: float | None = None
     time: float | None = None
     error: str | None = None  # primary file could not be read
+    pixels: object | None = None  # bracketeering PixelStats (thumb/layout): registration for scene refinement
+    camera: str = ""  # body key (make|model|serial)
 
 
 @dataclass(slots=True)
@@ -63,6 +65,7 @@ class GroupInfo:
     best_exposed: str | None
     scene: int | None
     camera: str | None = None
+    scene_note: str | None = None  # why scene refinement changed this group's scene
 
 
 @dataclass(slots=True)
@@ -155,6 +158,8 @@ def ingest(
                 focal_length=shot.meta.focal_length,
                 time=shot.meta.capture_time,
                 error=errors.get(primary),
+                pixels=px,
+                camera="|".join(shot.camera_key),
             )
             for f in shot.files:
                 key = str(f.path)

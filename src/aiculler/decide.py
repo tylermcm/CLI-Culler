@@ -31,8 +31,13 @@ if TYPE_CHECKING:
 # near-identical frames get near-identical scores (rank normalisation would spread them to 0 and 1).
 RELATIVE_SCALE = {
     "sharpness": ("log", math.log(4.0)),  # a quarter of the best frame's Laplacian variance -> 0
+    "face_sharpness": ("log", math.log(4.0)),
     "exposure": ("linear", 0.5),  # half a quality point below the best -> 0
+    "maniqa": ("linear", 0.2),  # KonIQ-scale quality (0..1): 0.2 below the best -> 0
+    "appeal": ("linear", 0.25),  # Q-ReAlign level (0..1): one level (good -> fair) below the best -> 0
+    "preference": ("linear", 0.5),  # probability the user keeps it
 }
+SHORTLIST_METRICS = frozenset({"appeal", "preference"})
 MISSING = 0.5  # a candidate without a value (no preview) is scored as the set's middle
 
 
@@ -72,17 +77,26 @@ def combine(
     method: str,
     penalties: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
-    """Combined score per capture within one set (minus penalties), plus each metric's set-normalised value."""
+    """Combined score per capture within one set (minus penalties), plus each metric's set-normalised value.
+
+    Only the signals at least one candidate in the set has take part, and their weights are renormalised, so
+    a set scored without models is decided by the cheap signals on the same 0..1 scale. A candidate missing a
+    signal the others have gets the set's middle (``MISSING``), except for the late-stage signals (appeal,
+    preference): those run only on a set's shortlist, so a candidate without one was pruned and counts as worst.
+    """
     rel: dict[str, dict[str, float]] = {c: {} for c in captures}
-    for metric in weights:
-        normed = normalise({c: scores.get(c, {}).get(metric) for c in captures}, metric, method)
+    active = [m for m in weights if any(scores.get(c, {}).get(m) is not None for c in captures)]
+    for metric in active:
+        values = {c: scores.get(c, {}).get(metric) for c in captures}
+        normed = normalise(values, metric, method)
         for c in captures:
-            rel[c][metric] = normed[c]
-    total = sum(weights.values()) or 1.0
+            rel[c][metric] = 0.0 if (values[c] is None and metric in SHORTLIST_METRICS) else normed[c]
+    total = sum(weights[m] for m in active)
     pen = penalties or {}
-    combined = {
-        c: round(max(0.0, sum(w * rel[c][m] for m, w in weights.items()) / total - pen.get(c, 0.0)), 4) for c in captures
-    }
+    combined = {}
+    for c in captures:
+        base = sum(weights[m] * rel[c][m] for m in active) / total if total > 0 else 0.5
+        combined[c] = round(max(0.0, base - pen.get(c, 0.0)), 4)
     return combined, rel
 
 
@@ -103,13 +117,54 @@ class _State:
             self.reasons.append(reason)
 
 
-def _why_better(winner: str, loser: str, rel: dict[str, dict[str, float]]) -> str:
+def penalty_items(shoot: Shoot, scores: dict[str, dict[str, float]], settings: "CullSettings") -> dict[str, list[tuple[str, float, str]]]:
+    """Score penalties per capture: (name, amount, reason). Never on bracket frames."""
+    out: dict[str, list[tuple[str, float, str]]] = {}
+    for cid, values in scores.items():
+        if cid not in shoot.captures or shoot.group_of(cid).kind == "exposure":
+            continue
+        its = []
+        pen = clip_penalty(values, settings)
+        if pen > 0:
+            its.append(("clip_penalty", pen, f"one clipped region covers {values['clip_region']:.0%} of the frame"))
+        closed = values.get("eyes_closed")
+        if settings.require_eyes_open and closed is not None and closed >= settings.blink_threshold and settings.blink_penalty > 0:
+            who = "someone's eyes are closed" if values.get("face_count", 1) > 1 else "eyes closed"
+            its.append(("blink_penalty", settings.blink_penalty, f"{who} ({closed:.2f})"))
+        if its:
+            out[cid] = its
+    return out
+
+
+def _why_better(winner: str, loser: str, rel: dict[str, dict[str, float]], pnames: dict[str, set[str]] | None = None) -> str:
+    """Why ``winner`` beat ``loser``, as a predicate: "is sharper and more appealing, and has eyes open"."""
+    pnames = pnames or {}
+    is_: list[str] = []
+    has: list[str] = []
+    if "blink_penalty" in pnames.get(loser, set()) and "blink_penalty" not in pnames.get(winner, set()):
+        has.append("eyes open")
+
+    def ahead(metric: str) -> bool:
+        return rel[winner].get(metric, 0) - rel[loser].get(metric, 0) >= 0.05
+
+    if ahead("appeal"):
+        is_.append("more appealing")
+    if ahead("maniqa"):
+        is_.append("higher quality (MANIQA)")
+    if ahead("face_sharpness"):
+        has.append("a sharper face")
+    if ahead("sharpness"):
+        is_.append("sharper")
+    if ahead("exposure"):
+        is_.append("better exposed")
+    if ahead("preference"):
+        is_.append("more like your past keeps")
     parts = []
-    if rel[winner].get("sharpness", 0) - rel[loser].get("sharpness", 0) >= 0.05:
-        parts.append("sharper")
-    if rel[winner].get("exposure", 0) - rel[loser].get("exposure", 0) >= 0.05:
-        parts.append("better exposed")
-    return " and ".join(parts) if parts else "higher combined score"
+    if is_:
+        parts.append("is " + " and ".join(is_))
+    if has:
+        parts.append("has " + " and ".join(has))
+    return ", and ".join(parts) if parts else "has a higher combined score"
 
 
 def _name(shoot: Shoot, capture: str) -> str:
@@ -135,14 +190,9 @@ def decide(
     weights = {k: float(v) for k, v in settings.weights.items() if float(v) > 0}
     method = settings.normalise
     st: dict[str, _State] = {cid: _State() for cid in shoot.captures}
-    # Mid-sized clipped regions cost a little score; never on bracket frames.
-    penalties: dict[str, float] = {}
-    for cid, values in scores.items():
-        if shoot.group_of(cid).kind == "exposure":
-            continue
-        pen = clip_penalty(values, settings)
-        if pen > 0:
-            penalties[cid] = pen
+    items = penalty_items(shoot, scores, settings)
+    penalties = {cid: round(sum(x[1] for x in its), 4) for cid, its in items.items()}
+    pnames = {cid: {x[0] for x in its} for cid, its in items.items()}
 
     # 1. Unreadable and passthrough.
     for cid, err in routing.unreadable.items():
@@ -153,11 +203,11 @@ def decide(
     # 2. Bursts.
     burst_survivors: dict[str, list[str]] = {}
     for b in routing.bursts:
-        _rank_burst(shoot, b, routing.units[b.id], gates, scores, weights, method, st, burst_survivors, penalties)
+        _rank_burst(shoot, b, routing.units[b.id], gates, scores, weights, method, st, burst_survivors, penalties, pnames)
 
     # 3. Scenes.
     for s in routing.scenes:
-        _rank_scene(shoot, s, routing, gates, scores, weights, method, settings, st, burst_survivors, penalties)
+        _rank_scene(shoot, s, routing, gates, scores, weights, method, settings, st, burst_survivors, penalties, pnames)
 
     # 4. Review overrides.
     for g in shoot.groups.values():
@@ -195,10 +245,11 @@ def decide(
             raw["shadows_crushed"] = cap.exposure.shadows_crushed
         rel = {f"{k}_rel": v for k, v in s_.rel.items()}
         reasons = list(s_.reasons)
-        pen = penalties.get(f.capture, 0.0)
-        if pen > 0:
-            raw["clip_penalty"] = pen
-            reasons.append(f"score -{pen:.2f}: one clipped region covers {scores[f.capture]['clip_region']:.0%} of the frame")
+        for name, amount, why in items.get(f.capture, []):
+            raw[name] = amount
+            reasons.append(f"score -{amount:.2f}: {why}")
+        if g.scene_note:
+            reasons.append(g.scene_note)
         if not f.primary:
             reasons.append(f"follows its shot {Path(cap.primary).name}")
         out[path] = FileDecision(
@@ -220,7 +271,7 @@ def decide(
     return out
 
 
-def _rank_burst(shoot, b: ComparisonSet, unit: Unit, gates, scores, weights, method, st, survivors, penalties) -> None:
+def _rank_burst(shoot, b: ComparisonSet, unit: Unit, gates, scores, weights, method, st, survivors, penalties, pnames) -> None:
     combined, rel = combine(b.members, scores, weights, method, penalties)
     index = {c: i for i, c in enumerate(b.members)}
     order = sorted(b.members, key=lambda c: (gates.failed(c), -combined[c], index[c]))
@@ -246,11 +297,11 @@ def _rank_burst(shoot, b: ComparisonSet, unit: Unit, gates, scores, weights, met
             s_.set(
                 "reject",
                 f"rejected: {better} better frame{'s' if better != 1 else ''} in burst {b.id} (keeping {keep}); "
-                f"{_name(shoot, ok[0])} is {_why_better(ok[0], c, rel)}",
+                f"{_name(shoot, ok[0])} {_why_better(ok[0], c, rel, pnames)}",
             )
 
 
-def _rank_scene(shoot, s: ComparisonSet, routing, gates, scores, weights, method, settings, st, survivors, penalties) -> None:
+def _rank_scene(shoot, s: ComparisonSet, routing, gates, scores, weights, method, settings, st, survivors, penalties, pnames) -> None:
     units = [routing.units[u] for u in s.members]
     reps = [u.rep for u in units]
     combined, rel = combine(reps, scores, weights, method, penalties)
@@ -309,7 +360,7 @@ def _rank_scene(shoot, s: ComparisonSet, routing, gates, scores, weights, method
             keep = s.keep or 0
             reason = (
                 f"rejected: {better} better unit{'s' if better != 1 else ''} in {scene_name} (keeping {keep}); "
-                f"{_unit_label(shoot, best)} is {_why_better(best.rep, u.rep, rel)}"
+                f"{_unit_label(shoot, best)} {_why_better(best.rep, u.rep, rel, pnames)}"
             )
             _apply(shoot, u, "reject", reason, routing, st, survivors)
 

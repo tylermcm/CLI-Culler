@@ -24,6 +24,7 @@ class Frame:
     bias: float = 0.0  # exposure compensation, EV
     mode: int = 0  # EXIF ExposureMode: 0 auto, 1 manual, 2 auto bracket
     blown_sky: float = 0.0  # paint this fraction of the frame's height, from the top, pure white
+    marker: int | None = None  # paint a 32 px block (R = marker) in the bottom-left corner, so fake models can tell frames apart
 
 
 def render(scene: int, size=(480, 320)):
@@ -67,6 +68,10 @@ def jpeg_bytes(frame: Frame) -> bytes:
         from PIL import ImageDraw
 
         ImageDraw.Draw(im).rectangle([0, 0, im.width, int(im.height * frame.blown_sky)], fill=(255, 255, 255))
+    if frame.marker is not None:
+        from PIL import ImageDraw
+
+        ImageDraw.Draw(im).rectangle([0, im.height - 32, 31, im.height - 1], fill=(frame.marker, 128, 128))
     whole = int(frame.second)
     sub = int(round((frame.second - whole) * 100))
     exif = Image.Exif()
@@ -113,3 +118,12 @@ def bracket(prefix: str, start: int, t0: float, scene: int, evs=(0.0, -1.0, 1.0)
         den = int(round(250 / (2 ** ev)))
         out.append(Frame(f"{prefix}{start + i:04d}", t0 + i * pace, scene, gain=2 ** (ev * 0.6), exposure=(1, den), bias=ev, mode=2))
     return out
+
+
+def read_marker(image) -> int:
+    """The marker a frame was painted with (nearest multiple of 10), from any resized copy of it."""
+    import numpy as np
+
+    w, h = image.size
+    block = np.asarray(image.convert("RGB"))[h - max(2, h * 24 // 320) :, : max(2, w * 24 // 480), 0]
+    return int(round(float(block.mean()) / 10.0) * 10)

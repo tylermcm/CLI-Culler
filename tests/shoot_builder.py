@@ -45,6 +45,8 @@ class ShootBuilder:
                 exposure=ExposureStats(fr.get("hl", 0.0), fr.get("sh", 0.0), fr.get("mean", 0.45), "ok"),
                 featureless=fr.get("featureless", False),
                 error=fr.get("error"),
+                time=fr.get("time"),
+                camera="cam",
             )
             self.files[primary] = FileInfo(primary, cid, True, fr.get("error"))
             for x in extra:
@@ -53,7 +55,8 @@ class ShootBuilder:
             if "sharpness" in fr:
                 values["sharpness"] = fr["sharpness"]
             values["exposure"] = fr.get("exposure", 1.0)
-            for key in ("clip_region", "top_clip", "luma_mean", "luma_spread"):
+            for key in ("clip_region", "top_clip", "luma_mean", "luma_spread", "maniqa", "appeal", "face_sharpness",
+                        "eyes_closed", "face_count", "preference"):
                 if key in fr:
                     values[key] = fr[key]
             self.scores[cid] = values

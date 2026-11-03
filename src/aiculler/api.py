@@ -35,6 +35,10 @@ class GateSettings:
     washed_mean: float = 0.80  # mean luma at or above this...
     washed_spread: float = 0.15  # ...and tonal spread (p95 - p5) at or below this: reject ("washed out")
     shadows_crushed: float = 0.60  # fraction of crushed pixels above this: unusable
+    # Severe blur (needs MANIQA): MANIQA in the shoot's bottom maniqa_bottom fraction AND face (else whole-frame)
+    # sharpness below blur_ratio x the median of its comparison set.
+    maniqa_bottom: float = 0.02
+    blur_ratio: float = 0.35
     # A featureless preview is a black misfire, a blank frame, or a moon in an empty sky; only the
     # first is a clear failure, so by default it goes to review instead of being rejected.
     featureless: str = "review"
@@ -48,11 +52,24 @@ class CullSettings:
     focus_stacks: str = "keep_all"  # keep_all | cull
     timelapses: str = "keep_all"  # keep_all | cull
     review_below: float = 0.7  # group confidence below this, or warnings -> review
-    require_eyes_open: bool = True  # milestone 2 (faces)
-    keep_people_coverage: bool = True  # milestone 5 (AdaFace)
+    require_eyes_open: bool = True  # blinks count against a frame; in group shots, any prominent face
+    blink_threshold: float = 0.6  # eyes-closed score at or above this is a blink (the app's BLINK_THRESHOLD)
+    blink_penalty: float = 0.3  # combined-score points a blink costs
+    keep_people_coverage: bool = True  # each recognised person keeps at least one acceptable frame
+    face_cluster_threshold: float = 0.35  # AdaFace cosine for one person (the app's FACE_CLUSTER_THRESHOLD)
     gates: GateSettings = field(default_factory=GateSettings)
-    # Combined-score weights over set-normalised scores. Milestone 1 has only these two signals.
-    weights: dict[str, float] = field(default_factory=lambda: {"sharpness": 0.6, "exposure": 0.4})
+    # Combined-score weights over set-normalised scores (spec §8: appeal 0.4, technical 0.4 = MANIQA 0.25 +
+    # face 0.15, preference low until the harness shows it helps). A signal nobody in a set has is left out of
+    # that set's combination, so without models the cheap signals (sharpness, exposure) decide, as in milestone 1.
+    weights: dict[str, float] = field(default_factory=lambda: {
+        "appeal": 0.4, "maniqa": 0.25, "face_sharpness": 0.15, "preference": 0.1, "sharpness": 0.12, "exposure": 0.08,
+    })
+    appeal_shortlist: int = 3  # Q-ReAlign runs on at most this many per comparison set (at least keep + 1)
+    refine_scenes: bool = True  # split/merge bracketeering's scenes with TinyCLIP (milestone 4)
+    split_cos: float = 0.80  # consecutive groups of one scene less similar than this: split
+    merge_cos: float = 0.92  # adjacent scenes within merge_window this similar: merge (unless registration contradicts)
+    merge_window: float = 120.0  # seconds
+    preference_model: str | None = None  # path to a model from `ai-culler learn` (milestone 4)
     # How scores are made comparable within a set: "relative" (distance from the set's best, on an
     # absolute scale), "rank" (percentile) or "zscore".
     normalise: str = "relative"
@@ -88,6 +105,10 @@ class CullSettings:
             raise ValueError("gates: need 0 <= clip_region_ignore < clip_region_reject <= 1")
         if g.clip_penalty < 0:
             raise ValueError("gates.clip_penalty must be >= 0")
+        if self.appeal_shortlist < 1:
+            raise ValueError("appeal_shortlist must be >= 1")
+        if not -1.0 <= self.split_cos <= self.merge_cos <= 1.0:
+            raise ValueError("need -1 <= split_cos <= merge_cos <= 1")
         for name in ("bursts_keep", "scene_keep"):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -143,6 +164,7 @@ class CullResult:
     models: dict[str, str]
     timings: dict[str, float]
     stats: dict[str, int] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def summary(self) -> dict[str, int]:
@@ -169,64 +191,164 @@ def cull(
 ) -> CullResult:
     """Cull a shoot: keep / reject / review for every file, with reasons.
 
-    ``models`` is reserved for the app's ``ModelRegistry`` (milestone 2 on); milestone 1 uses only
-    bracketeering's exposure stats and whole-frame sharpness. ``cache_db`` (SQLite) caches scores by
-    capture identity and scorer revision, so re-running with new settings recomputes nothing.
-    ``cache_dir`` holds decoded previews (default: next to ``cache_db``, else ``.aiculler_cache``).
+    ``models``: a ``ModelRegistry`` (``ModelRegistry.from_app_manifest()``); None runs without models (exposure,
+    sharpness, clipping only). A model that is unavailable or fails to load is skipped with a warning
+    (``CullResult.warnings``); ``CullResult.models`` lists the ones actually used.
+    ``cache_db`` (SQLite) caches every score by capture identity and scorer revision, so re-running with new
+    settings re-runs no model. ``cache_dir`` holds decoded previews (default: next to ``cache_db``).
+
+    Stages, cheap to expensive: ingest -> TinyCLIP embed + scene refinement -> route -> cheap scores -> gates ->
+    faces -> MANIQA (contested frames only) -> blur gate -> Q-ReAlign (each contested set's shortlist only) ->
+    preference -> decide -> people coverage.
     """
     from aiculler import __version__
     from aiculler.decide import decide
     from aiculler.gates import apply_gates
     from aiculler.ingest import PreviewCache, ingest
+    from aiculler.models.registry import ModelRegistry, ModelUnavailable
     from aiculler.routing import route
-    from aiculler.scorers import score_captures
+    from aiculler.scorers import ScoreStore, default_scorers, run_scorers
+    from aiculler.stages import appeal_shortlist, blur_failures, contested
     from aiculler.storage import ScoreCache
 
     settings = settings or CullSettings()
+    registry = models if models is not None else ModelRegistry.none()
     progress = on_progress or (lambda stage, done, total: None)
     timings: dict[str, float] = {}
+    warnings: list[str] = []
+    used: dict[str, str] = {}
+    store = ScoreStore()
 
-    t = time.perf_counter()
-    progress("ingest", 0, 1)
-    shoot = ingest(folder, backend=settings.backend, exclude=settings.exclude, workers=workers)
-    progress("ingest", 1, 1)
-    timings["ingest"] = time.perf_counter() - t
+    def stage(name: str):
+        class _Timer:
+            def __enter__(self):
+                self.t = time.perf_counter()
 
-    t = time.perf_counter()
-    routing = route(shoot, settings)
-    timings["route"] = time.perf_counter() - t
+            def __exit__(self, *exc):
+                timings[name] = timings.get(name, 0.0) + time.perf_counter() - self.t
+                return False
+
+        return _Timer()
+
+    def run_model(name: str, key: str, make, captures) -> bool:
+        """Run a model scorer on ``captures``; on any failure to load, warn and carry on without it."""
+        if not captures:
+            return False
+        if not registry.available(key):
+            problem = registry.entries[key].problem if key in registry.entries else "unknown model"
+            if models is not None:
+                warnings.append(f"{name}: not used ({problem})")
+            return False
+        try:
+            scorer = make(registry)
+            with stage(name):
+                run_scorers(store, shoot, sorted(captures), [scorer], previews, cache, progress, batch_size=8, workers=workers)
+        except (ImportError, ModelUnavailable, OSError, RuntimeError) as exc:
+            warnings.append(f"{name}: not used ({type(exc).__name__}: {exc})")
+            return False
+        used[name] = scorer.revision
+        return True
+
+    with stage("ingest"):
+        progress("ingest", 0, 1)
+        shoot = ingest(folder, backend=settings.backend, exclude=settings.exclude, workers=workers)
+        progress("ingest", 1, 1)
 
     if cache_dir is None:
         cache_dir = Path(cache_db).with_suffix("").as_posix() + "_previews" if cache_db else ".aiculler_cache"
     previews = PreviewCache(cache_dir)
     cache = ScoreCache(cache_db) if cache_db else ScoreCache(":memory:")
+    preference = None
     try:
-        t = time.perf_counter()
-        scores, score_stats = score_captures(shoot, routing.scored_captures(), previews, cache, progress, workers=workers)
-        timings["score"] = time.perf_counter() - t
+        # 1-2. TinyCLIP embeddings (every readable capture), scene refinement.
+        from aiculler.scorers.models import AppealScorer, FacesScorer, ManiqaScorer, TinyClipScorer
+
+        if settings.preference_model:
+            from aiculler.preference import PreferenceModel
+
+            preference = PreferenceModel.load(settings.preference_model)
+        readable = [cid for cid, c in shoot.captures.items() if not c.error]
+        if settings.refine_scenes or preference is not None:
+            run_model("tinyclip", "tinyclip", TinyClipScorer, readable)
+        embeddings = {cid: d["embedding"] for cid, d in store.details.items() if d.get("embedding")}
+        scene_stats: dict[str, int] = {}
+        if settings.refine_scenes and embeddings:
+            from aiculler.scenes import refine_scenes
+
+            with stage("scenes"):
+                scene_stats = refine_scenes(shoot, embeddings, settings)
+
+        # 3. Route.
+        with stage("route"):
+            routing = route(shoot, settings)
+        candidates = routing.scored_captures()
+
+        # 4. Cheap scores and clear-failure gates.
+        with stage("score"):
+            run_scorers(store, shoot, candidates, default_scorers(), previews, cache, progress, workers=workers)
+        with stage("gates"):
+            gates = apply_gates(shoot, routing, settings, store.scores)
+        live = contested(routing, gates)
+
+        # 5. Technical: faces (every ungated candidate, for blinks and people coverage), MANIQA (contested only).
+        face_frames = [c for c in candidates if not gates.failed(c)] if settings.keep_people_coverage else sorted(live)
+        if settings.require_eyes_open or settings.keep_people_coverage or settings.weights.get("face_sharpness", 0) > 0:
+            run_model("faces", "face_landmarker", FacesScorer, face_frames)
+        if run_model("maniqa", "maniqa", ManiqaScorer, live):
+            with stage("gates"):
+                for cid, failure in blur_failures(shoot, routing, gates, store.scores, settings).items():
+                    gates.failures.setdefault(cid, []).append(failure)
+            live = contested(routing, gates)
+
+        # 6. Appeal: Q-ReAlign only on each contested set's technical shortlist.
+        shortlist = appeal_shortlist(routing, gates, store.scores, settings, live) if registry.available("q_realign") else set()
+        run_model("appeal", "q_realign", AppealScorer, shortlist)
+
+        # 7. Preference.
+        if preference is not None:
+            if used.get("tinyclip") != preference.embedding_revision:
+                warnings.append(f"preference: not used (trained on {preference.embedding_revision}, embeddings are {used.get('tinyclip')})")
+            else:
+                with stage("preference"):
+                    ids = [c for c in candidates if c in embeddings]
+                    if ids:
+                        import numpy as np
+
+                        for cid, p in zip(ids, preference.score(np.asarray([embeddings[c] for c in ids]))):
+                            store.scores.setdefault(cid, {})["preference"] = round(float(p), 4)
+                used["preference"] = f"{preference.embedding_revision}+n{preference.examples}"
     finally:
         cache.close()
+        if models is not None:
+            registry.close()
 
-    t = time.perf_counter()
-    gates = apply_gates(shoot, routing, settings, scores)
-    timings["gates"] = time.perf_counter() - t
+    # 8. Decide; people coverage.
+    with stage("decide"):
+        files = decide(shoot, routing, gates, store.scores, settings)
+        people_stats: dict[str, int] = {}
+        if settings.keep_people_coverage and "faces" in used:
+            from aiculler.people import apply_people_coverage
 
-    t = time.perf_counter()
-    files = decide(shoot, routing, gates, scores, settings)
-    timings["decide"] = time.perf_counter() - t
+            people_stats = apply_people_coverage(shoot, files, store.details, gates, settings)
 
     stats = {
         "captures": len(shoot.captures),
         "groups": len(shoot.groups),
         "comparison_sets": len(routing.bursts) + sum(1 for s in routing.scenes if len(s.members) > 1),
-        **score_stats,
+        "scored_captures": len(candidates),
+        "contested_frames": len(live),
+        "appeal_frames": len(shortlist),
+        **scene_stats,
+        **people_stats,
+        **store.stats,
     }
     return CullResult(
         files=files,
         settings=settings,
         bracketeering_version=shoot.bracketeering_version,
         engine_version=__version__,
-        models={},
+        models=used,
         timings={k: round(v, 3) for k, v in timings.items()},
         stats=stats,
+        warnings=warnings,
     )
