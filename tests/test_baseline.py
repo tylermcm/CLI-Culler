@@ -187,3 +187,21 @@ def test_calibrate_compares_modes_with_a_library(tmp_path):
     m = cal["modes"]
     assert m["raw"]["rejects_caught_all_keeps_safe"] == 1  # only the bottom animal is below the low animal keep
     assert m["category"]["rejects_caught_all_keeps_safe"] == 2  # as percentiles of their category, both fall below
+
+
+def test_shoot_mode_floor_uses_the_shoots_own_percentiles(tmp_path):
+    from aiculler import CullSettings, cull
+    from aiculler.api import GateSettings
+
+    root = tmp_path / "shoot"
+    frames = [Frame(f"S{i:02d}", i * 100.0 + (i * i % 17) * 23, i % 8, marker=10 * (i + 1)) for i in range(25)]
+    write_shoot(root, frames)
+    quality = {10 * (i + 1): 0.30 + i / 100 for i in range(25)}  # S00 lowest ... S24 highest
+    maniqa = FakeManiqa(quality)
+    settings = CullSettings(models=["maniqa"], scene_keep=0, gates=GateSettings(quality_mode="shoot", quality_reject=0.10))
+    result = cull(root, settings, models=ModelRegistry.fake({"maniqa": maniqa}), cache_db=tmp_path / "c.sqlite")
+    d = {p.rsplit("/", 1)[-1][:-4]: f for p, f in result.files.items()}
+    rejected = sorted(n for n, f in d.items() if f.decision == "reject")
+    assert rejected == ["S00", "S01", "S02"]  # percentiles 0, 0.04, 0.08 of 25 frames
+    assert "percentile 0.00 of this shoot's 25 frames" in d["S00"].reasons[0]
+    assert len(set(maniqa.seen)) == 25  # a shoot percentile needs every competing frame scored
