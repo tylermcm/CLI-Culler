@@ -93,9 +93,8 @@ def run_scorers(
     for scorer in scorers:
         cached = cache.get_many(capture_ids, scorer.name, scorer.revision)
         todo = [cid for cid in capture_ids if cid not in cached]
-        store.stats[f"{scorer.name}_frames"] = len(capture_ids)
-        store.stats[f"{scorer.name}_computed"] = len(todo)
-        store.stats[f"{scorer.name}_cached"] = len(cached)
+        for key, n in (("frames", len(capture_ids)), ("computed", len(todo)), ("cached", len(cached))):
+            store.stats[f"{scorer.name}_{key}"] = store.stats.get(f"{scorer.name}_{key}", 0) + n  # summed over calls
         for cid, values in cached.items():
             store.add(cid, values)
         done, total = len(cached), len(capture_ids)

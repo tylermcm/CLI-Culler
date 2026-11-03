@@ -20,6 +20,7 @@ SEQUENCE_MODES = ("keep_all", "cull")
 FEATURELESS_MODES = ("review", "reject", "off")
 NORMALISE_MODES = ("relative", "rank", "zscore")
 REVIEW_WARNING_MODES = ("doubt", "all", "none")
+MANIQA_SCOPES = ("keepers", "all")
 # Optional models. The cull is complete without any of them: gates reject the junk, and bursts, brackets and
 # near-duplicate scenes are culled on exposure, sharpness and clipping. Each one adds something:
 #   faces   MediaPipe: blinks and face-crop sharpness count when ranking (contested frames only)
@@ -53,6 +54,12 @@ class GateSettings:
     washed_mean: float = 0.80  # mean luma at or above this...
     washed_spread: float = 0.15  # ...and tonal spread (p95 - p5) at or below this: reject ("washed out")
     shadows_crushed: float = 0.60  # fraction of crushed pixels above this: unusable
+    # Quality floor (needs MANIQA, "maniqa" in models): every frame about to be kept is scored. Below quality_reject:
+    # rejected, even a lone frame (its contest, if any, moves to the next-best frame); below quality_review: review
+    # instead of keep. Never bracket frames or frames left out of culling. 0 turns a level off.
+    # PROVISIONAL: set from four shoots; to be replaced by a labelled baseline (ai-culler sample / calibrate).
+    quality_reject: float = 0.0
+    quality_review: float = 0.0
     # Severe blur (needs MANIQA): MANIQA in the shoot's bottom maniqa_bottom fraction AND face (else whole-frame)
     # sharpness below blur_ratio x the median of its comparison set.
     maniqa_bottom: float = 0.02
@@ -93,6 +100,9 @@ class CullSettings:
     weights: dict[str, float] = field(default_factory=lambda: {
         "appeal": 0.4, "maniqa": 0.25, "face_sharpness": 0.15, "preference": 0.1, "sharpness": 0.12, "exposure": 0.08,
     })
+    # Which frames MANIQA scores: "keepers" (contested frames, for ranking, and every frame about to be kept, for
+    # the quality floor) or "all" (every frame that competes, lone frames included, whether kept or not).
+    maniqa_scope: str = "keepers"
     appeal_shortlist: int = 3  # Q-ReAlign runs on at most this many per comparison set (at least keep + 1)
     refine_scenes: bool = False  # with "search": also split/merge bracketeering's scenes by TinyCLIP similarity
     split_cos: float = 0.80  # consecutive groups of one scene less similar than this: split
@@ -136,11 +146,14 @@ class CullSettings:
         check("gates.featureless", self.gates.featureless, FEATURELESS_MODES)
         check("normalise", self.normalise, NORMALISE_MODES)
         check("review_warnings", self.review_warnings, REVIEW_WARNING_MODES)
+        check("maniqa_scope", self.maniqa_scope, MANIQA_SCOPES)
         for m in self.models:
             check("models", m, MODEL_FEATURES + ("all",))
         g = self.gates
         if not 0.0 <= g.clip_region_ignore < g.clip_region_reject <= 1.0:
             raise ValueError("gates: need 0 <= clip_region_ignore < clip_region_reject <= 1")
+        if g.quality_reject < 0 or g.quality_review < 0 or (g.quality_review and g.quality_reject > g.quality_review):
+            raise ValueError("gates: need 0 <= quality_reject <= quality_review (0 = off)")
         if g.clip_penalty < 0:
             raise ValueError("gates.clip_penalty must be >= 0")
         if self.appeal_shortlist < 1:
@@ -235,6 +248,12 @@ class CullResult:
         return decisions_document(self)
 
 
+def floor_applies(shoot, routing, capture: str) -> bool:
+    """The quality floor judges frames that compete: not bracket frames (moving brackets' included), not frames left
+    out of culling."""
+    return capture not in routing.passthrough and shoot.group_of(capture).kind != "exposure"
+
+
 def build_index(shoot, used: dict[str, str], embeddings: dict[str, list[float]], people, settings: CullSettings) -> dict:
     """The index for semantic and people search: what the "search" and "people" features found, per capture."""
     index: dict = {}
@@ -279,7 +298,7 @@ def cull(
     """
     from aiculler import __version__
     from aiculler.decide import decide
-    from aiculler.gates import apply_gates
+    from aiculler.gates import apply_gates, quality_check
     from aiculler.ingest import PreviewCache, ingest
     from aiculler.models.registry import ModelRegistry
     from aiculler.routing import route
@@ -385,8 +404,9 @@ def cull(
         face_frames = readable if people_on else (sorted(live) if "faces" in features else [])
         run_model("faces", "face_landmarker", FacesScorer, face_frames)
 
-        # 5. MANIQA on contested frames, then the severe-blur gate.
-        if "maniqa" in features and run_model("maniqa", "maniqa", ManiqaScorer, live):
+        # 5. MANIQA on contested frames (or every competing frame: maniqa_scope all), then the severe-blur gate.
+        maniqa_frames = sorted(live) if settings.maniqa_scope == "keepers" else [c for c in candidates if not gates.failed(c)]
+        if "maniqa" in features and run_model("maniqa", "maniqa", ManiqaScorer, maniqa_frames):
             with stage("gates"):
                 for cid, failure in blur_failures(shoot, routing, gates, store.scores, settings).items():
                     gates.failures.setdefault(cid, []).append(failure)
@@ -410,13 +430,47 @@ def cull(
                         for cid, p in zip(ids, preference.score(np.asarray([embeddings[c] for c in ids]))):
                             store.scores.setdefault(cid, {})["preference"] = round(float(p), 4)
                 used["preference"] = f"{preference.embedding_revision}+n{preference.examples}"
+        # 8. Decide, then the quality floor: MANIQA on every frame about to be kept; a frame below the floor fails a
+        # gate and its contest is decided again, until no new keeper needs a score.
+        maniqa_broken = any(w.startswith("maniqa: not used") for w in warnings)
+        floor = ("maniqa" in features and not maniqa_broken and registry.available("maniqa")
+                 and (settings.gates.quality_reject > 0 or settings.gates.quality_review > 0))
+        floor_stats = {"quality_rejected": 0, "quality_review": 0, "floor_rounds": 0}
+        with stage("decide"):
+            files = decide(shoot, routing, gates, store.scores, settings)
+        checked: set[str] = set()
+        while floor:
+            keepers = [d.capture for d in files.values() if d.primary and d.decision == "keep" and d.capture not in checked
+                       and floor_applies(shoot, routing, d.capture)]
+            if not keepers:
+                break
+            floor_stats["floor_rounds"] += 1
+            todo = [c for c in keepers if "maniqa" not in store.scores.get(c, {})]
+            if todo and not run_model("maniqa", "maniqa", ManiqaScorer, todo):
+                floor = False  # MANIQA failed: no floor; the decisions so far stand
+                break
+            changed = False
+            for cid in keepers:
+                checked.add(cid)
+                failure, flag = quality_check(store.scores.get(cid, {}).get("maniqa"), settings)
+                if failure is not None:
+                    gates.failures.setdefault(cid, []).append(failure)
+                    floor_stats["quality_rejected"] += 1
+                    changed = True
+                elif flag is not None:
+                    gates.flags.setdefault(cid, []).append(flag)
+                    floor_stats["quality_review"] += 1
+                    changed = True
+            if not changed:
+                break
+            with stage("decide"):
+                files = decide(shoot, routing, gates, store.scores, settings)
     finally:
         cache.close()
         registry.close()
 
-    # 8. Decide; people (index and coverage).
+    # 9. People (index and coverage).
     with stage("decide"):
-        files = decide(shoot, routing, gates, store.scores, settings)
         people_stats: dict[str, int] = {}
         people = []
         if people_on and "faces" in used:
@@ -438,6 +492,7 @@ def cull(
         "contested_frames": len(live),
         "appeal_frames": len(shortlist),
         **scene_stats,
+        **({k: v for k, v in floor_stats.items()} if floor else {}),
         **people_stats,
         **store.stats,
     }

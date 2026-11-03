@@ -343,7 +343,7 @@ def _rank_scene(shoot, s: ComparisonSet, routing, gates, scores, weights, method
     winners = ok if s.keep is None else ok[: s.keep]
     rescued = None
     if not ok:
-        rescued = next((u for u in order if not gates.only_black(u.rep)), None)
+        rescued = next((u for u in order if not gates.decisive(u.rep)), None)
 
     for rank, u in enumerate(order, 1):
         # Units other than bursts take the scene's ranking as their comparison set.

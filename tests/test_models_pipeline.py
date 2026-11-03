@@ -273,3 +273,29 @@ def test_learn_trains_on_picks_from_past_shoots(tmp_path):
     assert PreferenceModel.load(path).embedding_revision == "fake-tinyclip+224-bilinear-v1"
     with pytest.raises(ValueError, match="TinyCLIP is needed"):
         learn_preference([shoot], "picks", ModelRegistry.none())
+
+
+def test_quality_floor_rejects_lone_frames_and_moves_contests_on(shoot, tmp_path):
+    from aiculler.api import GateSettings
+
+    maniqa = FakeManiqa({20: 0.6, 30: 0.6, 40: 0.6, 50: 0.35, 60: 0.25, 200: 0.2})
+    reg = ModelRegistry.fake({"maniqa": maniqa})
+    # Rank on sharpness alone (the synthetic frames get sharper with the marker: DSC_0005 first, then DSC_0004), so
+    # the floor, not MANIQA's ranking weight, decides.
+    settings = CullSettings(bursts_keep=1, models=["maniqa"], weights={"sharpness": 1.0},
+                            gates=GateSettings(quality_reject=0.3, quality_review=0.4, blur_ratio=0.0))
+    result = cull(shoot, settings, models=reg, cache_db=tmp_path / "c.sqlite")
+    d = {p.rsplit("/", 1)[-1]: f for p, f in result.files.items()}
+    # The lone frame is below the floor: rejected, not rescued for review like other gate failures of a lone frame.
+    assert d["DSC_0100.JPG"].decision == "reject" and "below the quality floor (MANIQA 0.200 < 0.3)" in d["DSC_0100.JPG"].reasons[0]
+    assert d["DSC_0100.JPG"].gates == ["quality"] and 200 in maniqa.seen  # scored only because it was about to be kept
+    # The burst winner fails the floor; the next frame wins, but is in the review band.
+    assert d["DSC_0005.JPG"].decision == "reject" and d["DSC_0005.JPG"].gates == ["quality"]
+    assert d["DSC_0004.JPG"].decision == "review" and any("low quality (MANIQA 0.350" in r for r in d["DSC_0004.JPG"].reasons)
+    assert {d[f"DSC_000{i}.JPG"].decision for i in (1, 2, 3)} == {"reject"}
+    assert result.stats["quality_rejected"] == 2 and result.stats["quality_review"] == 1
+
+    # Floor off (the default): MANIQA scores only contested frames, and the lone frame is kept unscored.
+    maniqa.seen.clear()
+    off = cull(shoot, CullSettings(bursts_keep=1, models=["maniqa"]), models=reg, cache_db=tmp_path / "c2.sqlite")
+    assert 200 not in maniqa.seen and {f.decision for p, f in off.files.items() if "DSC_0100" in p} == {"keep"}

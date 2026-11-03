@@ -30,6 +30,10 @@ if TYPE_CHECKING:
     from aiculler.api import CullSettings
 
 BLACK = "black"
+QUALITY = "quality"
+# Failures no rescue undoes: a lone frame (or a scene where everything failed) is otherwise kept for review, but a
+# black frame or one below the quality floor is rejected even then.
+DECISIVE = (BLACK, QUALITY)
 
 
 @dataclass
@@ -46,9 +50,21 @@ class GateResults:
     def failed(self, capture: str) -> bool:
         return bool(self.failures.get(capture))
 
-    def only_black(self, capture: str) -> bool:
-        fails = self.failures.get(capture) or []
-        return bool(fails) and all(f.gate == BLACK for f in fails)
+    def decisive(self, capture: str) -> bool:
+        """Failed a gate no rescue undoes (black frame, below the quality floor)."""
+        return any(f.gate in DECISIVE for f in self.failures.get(capture) or [])
+
+
+def quality_check(maniqa: float | None, settings: "CullSettings") -> tuple[GateFailure | None, str | None]:
+    """The quality floor on a MANIQA score: (failure, review flag); both None when it passes or is unscored."""
+    g = settings.gates
+    if maniqa is None:
+        return None, None
+    if g.quality_reject > 0 and maniqa < g.quality_reject:
+        return GateFailure(QUALITY, f"below the quality floor (MANIQA {maniqa:.3f} < {g.quality_reject:g})"), None
+    if g.quality_review > 0 and maniqa < g.quality_review:
+        return None, f"low quality (MANIQA {maniqa:.3f} < {g.quality_review:g})"
+    return None, None
 
 
 def highlight_failures(values: dict[str, float], settings: "CullSettings") -> list[GateFailure]:
