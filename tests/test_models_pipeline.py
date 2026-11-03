@@ -222,3 +222,25 @@ def test_cli_cull_with_models_flag_reports_what_was_used(shoot, tmp_path, fake_a
     assert "q_realign" in err and "not available" in err
     # MANIQA's files are present, but this environment cannot load a real checkpoint from 5 bytes: it degrades.
     assert any(w.startswith("maniqa: not used") for w in doc["warnings"])
+
+
+def test_learn_trains_on_picks_from_past_shoots(tmp_path):
+    import shutil
+
+    from aiculler.preference import PreferenceModel, learn_preference
+
+    shoot = tmp_path / "past"
+    frames = [Frame(f"DSC_{i:04d}", i * 30.0, i % 3, marker=10 * i) for i in range(1, 13)]
+    paths = write_shoot(shoot, frames)
+    (shoot / "_winners").mkdir()
+    picked = {"DSC_0002", "DSC_0005", "DSC_0008"}  # markers 20, 50, 80: "warm" embeddings
+    for name in picked:
+        shutil.copy2(paths[name], shoot / "_winners" / f"{name}.JPG")
+    clip = FakeClip({m: ([1.0, 0.1 * (m % 7), 0.0] if m in (20, 50, 80) else [0.0, 0.1 * (m % 7), 1.0]) for m in range(10, 130, 10)})
+    model, summary = learn_preference([shoot], "picks", ModelRegistry.fake({"tinyclip": clip}), cache_db=tmp_path / "c.sqlite")
+    assert summary[0]["examples"] == 12 and summary[0]["kept"] == 3
+    assert model.positives == 3 and model.examples == 12 and model.diagnostics["auc"] > 0.9
+    path = model.save(tmp_path / "pref.joblib")
+    assert PreferenceModel.load(path).embedding_revision == "fake-tinyclip+224-bilinear-v1"
+    with pytest.raises(ValueError, match="TinyCLIP is needed"):
+        learn_preference([shoot], "picks", ModelRegistry.none())

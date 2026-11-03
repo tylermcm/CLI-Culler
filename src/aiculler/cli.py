@@ -1072,6 +1072,35 @@ def command_evaluate(args) -> int:
     return 0
 
 
+def command_learn(args) -> int:
+    from aiculler.preference import learn_preference
+
+    registry = _load_registry(args)
+    if registry is None:
+        raise SystemExit("ai-culler learn: TinyCLIP is needed; point --models at the image-triage app")
+    try:
+        model, summary = learn_preference(
+            [Path(f).expanduser() for f in args.folder],
+            args.truth,
+            registry,
+            truth_file=args.truth_file,
+            session=args.triage_session,
+            cache_db=args.db,
+            cache_dir=args.cache,
+            backend=args.backend or "auto",
+        )
+    except ValueError as exc:
+        raise SystemExit(f"ai-culler learn: {exc}") from exc
+    path = model.save(args.out)
+    for s in summary:
+        print(f"{s['shoot']}: {s['examples']} labelled captures, {s['kept']} kept ({s['truth']})")
+    d = model.diagnostics
+    auc = "n/a" if d.get("auc") is None else f"{d['auc']:.3f}"
+    print(f"preference model: {model.examples} examples, {model.positives} kept; held-out AUC {auc} ({d.get('method')}) -> {path}")
+    print("use it with: \"preference_model\": \"%s\" in the cull settings" % path)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ai-culler", description="Headless offline photo culling engine")
     parser.add_argument("--db", default="aiculler.sqlite", type=Path, help="SQLite database path")
@@ -1295,6 +1324,18 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_cmd.add_argument("--out", type=Path, help="report.md path (default: stdout)")
     evaluate_cmd.add_argument("--metrics-out", type=Path, help="Optional metrics JSON")
     evaluate_cmd.set_defaults(func=command_evaluate)
+
+    learn_cmd = subparsers.add_parser("learn", help="Train a preference model (TinyCLIP) from your past culls")
+    learn_cmd.add_argument("folder", type=Path, nargs="+", help="Shoot folders with past culls (each one shoot)")
+    learn_cmd.add_argument("--truth", default="picks", help="picks, csv, triage, xmp or lrcat (as for evaluate)")
+    learn_cmd.add_argument("--truth-file", help="File for --truth csv / lrcat / a triage decisions.sqlite3")
+    learn_cmd.add_argument("--triage-session", help="ImageTriage session (profile preset)")
+    learn_cmd.add_argument("--out", type=Path, default=Path("preference.joblib"))
+    learn_cmd.add_argument("--cache", type=Path, help="Preview cache directory (default: next to --db)")
+    learn_cmd.add_argument("--backend", choices=["auto", "exiftool", "native"])
+    learn_cmd.add_argument("--models", default="auto", help="Where the app's models are (as for cull)")
+    learn_cmd.add_argument("--device", default="auto")
+    learn_cmd.set_defaults(func=command_learn)
 
     return parser
 

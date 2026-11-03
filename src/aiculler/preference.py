@@ -111,3 +111,67 @@ def _auc(scores: np.ndarray, y: np.ndarray) -> float | None:
         return None
     greater = (pos[:, None] > neg[None, :]).sum() + 0.5 * (pos[:, None] == neg[None, :]).sum()
     return round(float(greater) / (len(pos) * len(neg)), 4)
+
+
+def learn_preference(
+    shoots: list[str | Path],
+    truth: str,
+    registry,
+    *,
+    truth_file: str | Path | None = None,
+    session: str | None = None,
+    cache_db: str | Path | None = None,
+    cache_dir: str | Path | None = None,
+    backend: str = "auto",
+    progress=None,
+) -> tuple[PreferenceModel, list[dict]]:
+    """Train a preference model on TinyCLIP embeddings of past culls. Each folder in ``shoots`` is one shoot
+    (with its pick/export folders inside it for ``truth="picks"``). Returns the model and one summary per shoot."""
+    from aiculler.ingest import PreviewCache, ingest
+    from aiculler.scorers import ScoreStore, run_scorers
+    from aiculler.scorers.models import TinyClipScorer
+    from aiculler.storage import ScoreCache
+    from aiculler.truth import load_truth, merge_truths
+
+    if not registry.available("tinyclip"):
+        raise ValueError(f"TinyCLIP is needed to learn preferences: {registry.problems().get('tinyclip')}")
+    scorer = TinyClipScorer(registry)
+    if cache_dir is None:
+        cache_dir = Path(cache_db).with_suffix("").as_posix() + "_previews" if cache_db else ".aiculler_cache"
+    previews = PreviewCache(cache_dir)
+    cache = ScoreCache(cache_db) if cache_db else ScoreCache(":memory:")
+    xs: list[list[float]] = []
+    ys: list[int] = []
+    summary: list[dict] = []
+    try:
+        for folder in shoots:
+            shoot = ingest(folder, backend=backend)
+            store = ScoreStore()
+            readable = [cid for cid, c in shoot.captures.items() if not c.error]
+            run_scorers(store, shoot, readable, [scorer], previews, cache, progress)
+            doc = {"files": {p: {"capture": f.capture, "primary": f.primary} for p, f in shoot.files.items()}}
+            ts = load_truth(truth, doc, truth_file=truth_file, session=session)
+            kept = labelled = 0
+            for cid in readable:
+                emb = (store.details.get(cid) or {}).get("embedding")
+                if emb is None or cid in ts.excluded:
+                    continue
+                truths = [ts.truth[p] for p in shoot.captures[cid].files if p in ts.truth]
+                t = merge_truths(truths) if truths else None
+                if t is None or not t.labelled(3):
+                    if ts.unlabelled == "exclude":
+                        continue
+                    label = 0
+                else:
+                    label = int(t.kept(3))
+                xs.append(emb)
+                ys.append(label)
+                labelled += 1
+                kept += label
+            summary.append({"shoot": str(folder), "captures": len(shoot.captures), "examples": labelled, "kept": kept,
+                            "truth": ts.source})
+    finally:
+        cache.close()
+        registry.close()
+    model = train(np.asarray(xs, dtype=np.float32), np.asarray(ys), embedding_revision=scorer.revision)
+    return model, summary
