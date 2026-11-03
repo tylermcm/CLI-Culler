@@ -1023,6 +1023,11 @@ def command_cull(args) -> int:
     path = write_decisions(result, args.out)
     s = result.summary
     print(f"{s['files']} files: {s['keep']} keep, {s['reject']} reject, {s['review']} review -> {path}")
+    if args.xmp:
+        from aiculler.outputs import write_xmp
+
+        c = write_xmp(result, overwrite_ratings=args.overwrite_ratings)
+        print(f"XMP sidecars: {c['written']} written, {c['unchanged']} unchanged, {c['skipped']} left alone (your own ratings)")
     print("timings: " + ", ".join(f"{k} {v:.2f}s" for k, v in result.timings.items()))
     logger.summary({"out": str(path), "summary": s})
     logger.close()
@@ -1299,6 +1304,8 @@ def build_parser() -> argparse.ArgumentParser:
     cull_cmd = subparsers.add_parser("cull", help="Cull a shoot: keep / reject / review per file, with reasons")
     add_cull_args(cull_cmd)
     cull_cmd.add_argument("--out", type=Path, default=Path("decisions.json"), help="decisions.json path")
+    cull_cmd.add_argument("--xmp", action="store_true", help="Also write decisions to XMP sidecars (keep 3*, review yellow, reject 1* red)")
+    cull_cmd.add_argument("--overwrite-ratings", action="store_true", help="With --xmp: replace ratings/labels you set yourself")
     cull_cmd.set_defaults(func=command_cull)
 
     evaluate_cmd = subparsers.add_parser("evaluate", help="Report agreement with your own culls (picks, CSV, ImageTriage, XMP)")
