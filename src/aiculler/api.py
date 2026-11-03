@@ -179,7 +179,7 @@ def cull(
     cache = ScoreCache(cache_db) if cache_db else ScoreCache(":memory:")
     try:
         t = time.perf_counter()
-        scores, score_stats = score_captures(shoot, routing.scored_captures(), previews, cache, progress)
+        scores, score_stats = score_captures(shoot, routing.scored_captures(), previews, cache, progress, workers=workers)
         timings["score"] = time.perf_counter() - t
     finally:
         cache.close()

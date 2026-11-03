@@ -7,6 +7,8 @@ Milestone 1 has two: bracketeering's exposure stats and whole-frame sharpness.
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
@@ -51,6 +53,7 @@ def score_captures(
     progress: Callable[[str, int, int], None] | None = None,
     scorers: list[Scorer] | None = None,
     batch_size: int = 32,
+    workers: int | None = None,
 ) -> tuple[dict[str, dict[str, float]], dict[str, int]]:
     """Scores per capture, merged across scorers: {capture: {metric: value}}. Cached by capture + revision."""
     progress = progress or (lambda stage, done, total: None)
@@ -70,6 +73,9 @@ def score_captures(
         for start in range(0, len(todo), batch_size):
             ids = todo[start : start + batch_size]
             batch = [Candidate(shoot.captures[cid], previews.load) for cid in ids]
+            if getattr(scorer, "needs_pixels", False):
+                with ThreadPoolExecutor(max_workers=workers or min(8, os.cpu_count() or 4)) as pool:
+                    list(pool.map(lambda c: c.image, batch))  # decode previews in parallel (PIL releases the GIL)
             results = scorer.score(batch)
             cache.put_many([(cid, scorer.name, scorer.revision, res) for cid, res in zip(ids, results)])
             for cid, res in zip(ids, results):

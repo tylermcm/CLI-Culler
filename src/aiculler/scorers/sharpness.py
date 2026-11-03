@@ -25,6 +25,7 @@ def laplacian_variance(gray: np.ndarray) -> float:
 class SharpnessScorer:
     name = "sharpness"
     revision = "laplacian-var-wholeframe-1024-v1"
+    needs_pixels = True
 
     def score(self, batch) -> list[dict]:
         out = []
