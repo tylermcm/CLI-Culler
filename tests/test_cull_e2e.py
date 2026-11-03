@@ -173,3 +173,41 @@ def test_example_settings_file_loads():
     from pathlib import Path
 
     CullSettings.from_json(Path(__file__).resolve().parent.parent / "cull_settings.example.json")
+
+
+def _tiff_with_orientation(orientation: int, jpeg: bytes, big_endian: bool = False) -> bytes:
+    """A minimal TIFF-style RAW: IFD0 with Orientation and a JPEG preview (JPEGInterchangeFormat/Length)."""
+    import struct
+
+    e = ">" if big_endian else "<"
+    entries = [(0x0112, 3, 1, orientation), (0x0201, 4, 1, 0), (0x0202, 4, 1, len(jpeg))]
+    ifd_size = 2 + 12 * len(entries) + 4
+    jpeg_offset = 8 + ifd_size
+    out = (b"MM" if big_endian else b"II") + struct.pack(e + "HI", 42, 8) + struct.pack(e + "H", len(entries))
+    for tag, typ, n, value in entries:
+        if tag == 0x0201:
+            value = jpeg_offset
+        field = struct.pack(e + "H", value) + b"\x00\x00" if typ == 3 else struct.pack(e + "I", value)
+        out += struct.pack(e + "HHI", tag, typ, n) + field
+    return out + struct.pack(e + "I", 0) + jpeg
+
+
+@pytest.mark.parametrize("big_endian", [False, True])
+def test_raw_previews_are_rotated_by_the_container_orientation(tmp_path, big_endian):
+    import io
+
+    from PIL import Image
+
+    from aiculler.ingest import decode_upright, raw_orientation
+
+    landscape = Image.new("RGB", (300, 200), (10, 10, 10))
+    landscape.paste((250, 250, 250), (0, 0, 300, 40))  # bright band along the sensor's top edge
+    buf = io.BytesIO()
+    landscape.save(buf, "JPEG")
+    raw = tmp_path / "DSC_0001.NEF"
+    raw.write_bytes(_tiff_with_orientation(6, buf.getvalue(), big_endian))  # camera held vertically
+    assert raw_orientation(raw) == 6
+    im = decode_upright(raw, 1024)
+    assert im.size == (200, 300)  # upright: portrait
+    assert im.getpixel((190, 150))[0] > 200  # the band is now on the right, as the camera saw it
+    assert raw_orientation(tmp_path / "missing.NEF") is None

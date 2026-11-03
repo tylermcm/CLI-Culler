@@ -43,7 +43,7 @@ def clipping_stats(rgb: np.ndarray) -> dict[str, float]:
 
 class ClippingScorer:
     name = "clipping"
-    revision = "regions-8conn-250-v1"
+    revision = "regions-8conn-250-v2-upright"
     needs_pixels = True
 
     def score(self, batch) -> list[dict]:

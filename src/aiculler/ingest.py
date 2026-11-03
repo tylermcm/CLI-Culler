@@ -180,12 +180,94 @@ def ingest(
     return Shoot(shoot_groups, captures, files, bracketeering.__version__, report)
 
 
+_TIFF_ORIENTATION = 0x0112
+_TRANSPOSE = {2: "FLIP_LEFT_RIGHT", 3: "ROTATE_180", 4: "FLIP_TOP_BOTTOM", 5: "TRANSPOSE", 6: "ROTATE_270", 7: "TRANSVERSE", 8: "ROTATE_90"}
+
+
+def raw_orientation(path: str | Path) -> int | None:
+    """EXIF orientation (1-8) from a TIFF-based RAW container (NEF, ARW, CR2, DNG, ORF, ...), else None.
+
+    Same rule as the app (image_triage/raw_embedded_jpeg.py): the first IFD of the *main* chain carrying 0x0112.
+    Sub-IFDs and thumbnails are skipped: they hold the sensor's orientation (1) however the camera was held.
+    Embedded previews often carry no orientation of their own, so without this a vertical frame is analysed sideways.
+    """
+    import struct
+
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+            if head[:2] == b"II":
+                e = "<"
+            elif head[:2] == b"MM":
+                e = ">"
+            else:
+                return None
+            if struct.unpack(e + "H", head[2:4])[0] != 42:
+                return None
+            offset = struct.unpack(e + "I", head[4:8])[0]
+            seen: set[int] = set()
+            while offset and offset not in seen and len(seen) < 16:
+                seen.add(offset)
+                fh.seek(offset)
+                raw = fh.read(2)
+                if len(raw) != 2:
+                    return None
+                count = struct.unpack(e + "H", raw)[0]
+                if not 0 < count <= 4096:
+                    return None
+                data = fh.read(count * 12 + 4)
+                if len(data) < count * 12 + 4:
+                    return None
+                for i in range(count):
+                    tag, typ, n = struct.unpack(e + "HHI", data[i * 12 : i * 12 + 8])
+                    if tag == _TIFF_ORIENTATION and n >= 1:
+                        value = struct.unpack(e + "H", data[i * 12 + 8 : i * 12 + 10])[0] if typ == 3 else struct.unpack(e + "I", data[i * 12 + 8 : i * 12 + 12])[0]
+                        return int(value) if 1 <= value <= 8 else None
+                offset = struct.unpack(e + "I", data[count * 12 : count * 12 + 4])[0]
+    except (OSError, struct.error):
+        return None
+    return None
+
+
+def decode_upright(path: Path, long_edge: int, *, resample: str = "bilinear"):
+    """The file's preview as an upright RGB PIL image bounded to ``long_edge`` (never enlarged), or None.
+
+    RAW files are read through bracketeering's embedded-preview extraction (never decoded) and rotated by the
+    container's orientation; rendered files and RAWs without one use the JPEG's own EXIF orientation. ``resample``
+    "lanczos" matches the app's model inputs (cascade/rankers/worker.load_image); "bilinear" is for the cache.
+    """
+    from PIL import Image, ImageOps
+    from bracketeering.preview import preview_source
+
+    src = preview_source(path)
+    if src is None:
+        return None
+    try:
+        with Image.open(io.BytesIO(src) if isinstance(src, bytes) else src) as im:
+            im.draft("RGB", (long_edge, long_edge))  # JPEG: decode at a reduced scale directly
+            orientation = raw_orientation(path) if isinstance(src, bytes) else None
+            if orientation and orientation != 1:
+                im = im.convert("RGB").transpose(getattr(Image.Transpose, _TRANSPOSE[orientation]))
+            else:
+                im = ImageOps.exif_transpose(im).convert("RGB")
+            if max(im.size) > long_edge:
+                scale = long_edge / max(im.size)
+                size = (max(1, round(im.width * scale)), max(1, round(im.height * scale)))
+                im = im.resize(size, Image.Resampling.LANCZOS if resample == "lanczos" else Image.Resampling.BILINEAR)
+            return im
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return None
+
+
 class PreviewCache:
     """Decoded previews at ~1024 px, cached on disk by capture identity.
 
     Uses ``bracketeering.preview.preview_source``, which parses the RAW container and returns its
     largest decodable embedded JPEG (or the file itself for rendered formats). Never decodes RAW data.
+    Previews are upright (``decode_upright``).
     """
+
+    VERSION = 2  # 2: rotated by the RAW container's orientation
 
     def __init__(self, cache_dir: str | Path, size: int = PREVIEW_SIZE):
         self.cache_dir = Path(cache_dir)
@@ -194,7 +276,7 @@ class PreviewCache:
 
     def path_for(self, capture_id: str) -> Path:
         digest = hashlib.sha1(capture_id.encode("utf-8")).hexdigest()[:20]
-        return self.cache_dir / f"{digest}_{self.size}.jpg"
+        return self.cache_dir / f"{digest}_{self.size}_v{self.VERSION}.jpg"
 
     def load(self, capture: Capture):
         """PIL RGB image of the capture's preview, or None if it has none."""
@@ -209,7 +291,7 @@ class PreviewCache:
                 cached.unlink(missing_ok=True)
         image = None
         for path in capture.files:  # primary first; a sidecar JPEG can stand in for an unreadable RAW
-            image = self._decode(Path(path))
+            image = decode_upright(Path(path), self.size)
             if image is not None:
                 break
         if image is None:
@@ -219,22 +301,13 @@ class PreviewCache:
         tmp.replace(cached)
         return image
 
-    def _decode(self, path: Path):
-        from PIL import Image, ImageOps
-        from bracketeering.preview import preview_source
-
-        src = preview_source(path)
-        if src is None:
-            return None
-        try:
-            with Image.open(io.BytesIO(src) if isinstance(src, bytes) else src) as im:
-                im.draft("RGB", (self.size, self.size))
-                im = ImageOps.exif_transpose(im)
-                im = im.convert("RGB")
-                im.thumbnail((self.size, self.size), Image.Resampling.BILINEAR)
-                return im
-        except (OSError, ValueError, Image.DecompressionBombError):
-            return None
+    def load_for_model(self, capture: Capture, long_edge: int):
+        """The capture's preview at a model's own input size (LANCZOS, like the app); not cached on disk."""
+        for path in capture.files:
+            image = decode_upright(Path(path), long_edge, resample="lanczos")
+            if image is not None:
+                return image
+        return None
 
 
 def luma(image) -> np.ndarray:
