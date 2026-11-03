@@ -53,9 +53,9 @@ write_decisions(result, "decisions.json")
 | scene | `scene_keep: N` (1) | Top N units kept. A frame alone in its scene has nothing to beat and is kept |
 
 - **Gates** reject only clear failures, never on bracket frames:
-  black misfires (always); one connected clipped region ≥ 25% of the frame; ≥ 60% of the top third clipped
+  black misfires (always); one connected clipped region ≥ 35% of the frame; ≥ 75% of the top third clipped
   ("sky blown out"); washed out (mean ≥ 0.80 and tonal spread p95−p5 ≤ 0.15); crushed shadows > 60%.
-  A clipped region of 5–25% is only a score penalty (up to `clip_penalty`); below 5%, nothing, however much
+  A clipped region of 5–35% is only a score penalty (up to `clip_penalty`); below 5%, nothing, however much
   clips overall in specks. All thresholds are in `gates`. Featureless previews go to review by default. If every
   unit in a scene fails a gate, the least-bad goes to review (never a black frame). `evaluate` lists the frames
   you kept that a gate rejects, and how close your keeps come to each threshold, for tuning.

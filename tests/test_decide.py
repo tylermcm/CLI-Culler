@@ -164,8 +164,8 @@ def test_gate_rejects_clear_failures_only():
 
 def test_whole_scene_failing_gates_keeps_least_bad_for_review():
     b = ShootBuilder()
-    b.single("A", scene=3, sharpness=100, clip_region=0.5)
-    b.single("B", scene=3, sharpness=300, clip_region=0.3)
+    b.single("A", scene=3, sharpness=100, clip_region=0.6)
+    b.single("B", scene=3, sharpness=300, clip_region=0.4)
     b.single("C", scene=3, sharpness=900, mean=0.005)  # black: never rescued
     d, _ = run(b)
     assert d["B"].decision == "review"
@@ -182,7 +182,7 @@ def test_lone_black_frame_is_rejected_not_rescued():
 
 def test_burst_entirely_gated_is_rescued_when_alone_in_scene():
     b = ShootBuilder()
-    b.group("burst", [{"name": "U0", "sharpness": 50, "clip_region": 0.5}, {"name": "U1", "sharpness": 80, "top_clip": 0.7}], scene=1)
+    b.group("burst", [{"name": "U0", "sharpness": 50, "clip_region": 0.5}, {"name": "U1", "sharpness": 80, "top_clip": 0.8}], scene=1)
     d, _ = run(b)
     assert d["U1"].decision == "review" and d["U0"].decision == "reject"
     assert not any(r.startswith("rejected:") for r in d["U1"].reasons)
@@ -284,15 +284,15 @@ def test_small_clipped_regions_cost_nothing_however_much_clips_overall():
 
 def test_mid_sized_region_is_a_score_penalty_only():
     b = ShootBuilder()
-    b.single("Mid", scene=1, sharpness=100, clip_region=0.15)  # halfway between 5% and 25%
+    b.single("Mid", scene=1, sharpness=100, clip_region=0.20)  # halfway between 5% and 35%
     b.single("Clean", scene=1, sharpness=100, clip_region=0.0)
     d, _ = run(b)
     assert d["Mid"].gates == [] and d["Mid"].scores["clip_penalty"] == 0.075
     assert d["Mid"].decision == "reject" and d["Clean"].decision == "keep"
-    assert d["Mid"].reasons[-1] == "score -0.07: one clipped region covers 15% of the frame"
+    assert d["Mid"].reasons[-1] == "score -0.07: one clipped region covers 20% of the frame"
     # A sharper frame still wins despite the penalty: it is a nudge, not a gate.
     b = ShootBuilder()
-    b.single("Mid", scene=1, sharpness=400, clip_region=0.15)
+    b.single("Mid", scene=1, sharpness=400, clip_region=0.20)
     b.single("Clean", scene=1, sharpness=100, clip_region=0.0)
     d, _ = run(b)
     assert d["Mid"].decision == "keep"
@@ -300,14 +300,14 @@ def test_mid_sized_region_is_a_score_penalty_only():
 
 def test_region_sky_and_washed_out_gates():
     b = ShootBuilder()
-    b.single("Region", scene=1, sharpness=900, clip_region=0.25)
-    b.single("Sky", scene=1, sharpness=900, clip_region=0.2, top_clip=0.6)
+    b.single("Region", scene=1, sharpness=900, clip_region=0.35)
+    b.single("Sky", scene=1, sharpness=900, clip_region=0.2, top_clip=0.75)
     b.single("Washed", scene=1, sharpness=900, luma_mean=0.85, luma_spread=0.1)
     b.single("Bright", scene=1, sharpness=900, luma_mean=0.85, luma_spread=0.4)  # high-key but contrasty: fine
     b.single("Fine", scene=1, sharpness=10)
     d, _ = run(b, CullSettings(scene_keep=2))
     assert d["Region"].gates == ["clip_region"]
-    assert d["Sky"].gates == ["sky_blown"] and "sky blown out (60% of the top third clipped" in d["Sky"].reasons[0]
+    assert d["Sky"].gates == ["sky_blown"] and "sky blown out (75% of the top third clipped" in d["Sky"].reasons[0]
     assert d["Washed"].gates == ["washed_out"] and "washed out" in d["Washed"].reasons[0]
     assert d["Bright"].gates == [] and d["Bright"].decision == "keep"
     assert d["Fine"].decision == "keep"  # the only other frame that passed the gates
@@ -334,3 +334,32 @@ def test_bracket_frames_never_get_the_clip_penalty():
     b.single("S1", scene=1, sharpness=100, clip_region=0.0)
     d, _ = run(b)
     assert "clip_penalty" not in d["B1"].scores and d["B1"].gates == []
+
+
+# Closest final picks to each gate on China 8-26 (evaluate --truth picks, values as reported, rounded up).
+CHINA_8_26_CLOSEST_PICKS = {
+    "_DSC1055": {"clip_region": 0.245, "top_clip": 0.595, "luma_mean": 0.6, "luma_spread": 0.5},
+    "_DSC1048": {"shadows_crushed": 0.365, "mean": 0.15},
+    "_DSC0570": {"luma_mean": 0.465, "luma_spread": 0.69},
+}
+
+
+def test_default_gates_pass_china_picks_with_margin():
+    from aiculler.gates import highlight_failures
+
+    s = CullSettings()
+    g = s.gates
+    for name, v in CHINA_8_26_CLOSEST_PICKS.items():
+        assert highlight_failures(v, s) == [], name
+    pick = CHINA_8_26_CLOSEST_PICKS["_DSC1055"]
+    assert g.clip_region_reject - pick["clip_region"] >= 0.10  # not a one-point pass
+    assert g.sky_blown - pick["top_clip"] >= 0.10
+    assert g.shadows_crushed - CHINA_8_26_CLOSEST_PICKS["_DSC1048"]["shadows_crushed"] >= 0.10
+    assert CHINA_8_26_CLOSEST_PICKS["_DSC1048"]["mean"] - g.black_mean >= 0.10
+
+    b = ShootBuilder()
+    b.single("_DSC1055", scene=1, sharpness=100, **CHINA_8_26_CLOSEST_PICKS["_DSC1055"])
+    b.single("_DSC1048", scene=2, sharpness=100, sh=0.365, mean=0.15)
+    b.single("_DSC0570", scene=3, sharpness=100, **CHINA_8_26_CLOSEST_PICKS["_DSC0570"])
+    d, _ = run(b)
+    assert all(x.gates == [] and x.decision == "keep" for x in d.values())

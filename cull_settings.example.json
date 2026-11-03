@@ -10,9 +10,9 @@
   "gates": {
     "black_mean": 0.02,
     "clip_region_ignore": 0.05,
-    "clip_region_reject": 0.25,
+    "clip_region_reject": 0.35,
     "clip_penalty": 0.15,
-    "sky_blown": 0.6,
+    "sky_blown": 0.75,
     "washed_mean": 0.8,
     "washed_spread": 0.15,
     "shadows_crushed": 0.6,
