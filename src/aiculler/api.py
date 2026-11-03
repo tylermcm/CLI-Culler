@@ -205,7 +205,7 @@ def cull(
     from aiculler.decide import decide
     from aiculler.gates import apply_gates
     from aiculler.ingest import PreviewCache, ingest
-    from aiculler.models.registry import ModelRegistry, ModelUnavailable
+    from aiculler.models.registry import ModelRegistry
     from aiculler.routing import route
     from aiculler.scorers import ScoreStore, default_scorers, run_scorers
     from aiculler.stages import appeal_shortlist, blur_failures, contested
@@ -243,8 +243,8 @@ def cull(
             scorer = make(registry)
             with stage(name):
                 run_scorers(store, shoot, sorted(captures), [scorer], previews, cache, progress, batch_size=8, workers=workers)
-        except (ImportError, ModelUnavailable, OSError, RuntimeError) as exc:
-            warnings.append(f"{name}: not used ({type(exc).__name__}: {exc})")
+        except Exception as exc:  # noqa: BLE001 - any failure to load or run a model skips that model, never the cull
+            warnings.append(f"{name}: not used ({type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''})")
             return False
         used[name] = scorer.revision
         return True
