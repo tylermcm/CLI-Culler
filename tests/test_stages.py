@@ -158,7 +158,7 @@ def test_scene_note_reaches_reasons_and_changes_who_competes():
 
 def test_people_coverage_promotes_the_only_good_frame_of_a_person():
     from aiculler.decide import decide
-    from aiculler.people import apply_people_coverage
+    from aiculler.people import apply_people_coverage, find_people, tag_people
 
     b = ShootBuilder()
     alice, bob = _emb(1, 0, 0, 0), _emb(0, 1, 0, 0)
@@ -176,21 +176,42 @@ def test_people_coverage_promotes_the_only_good_frame_of_a_person():
     routing = route(shoot, settings)
     gates = apply_gates(shoot, routing, settings, b.scores)
     files = decide(shoot, routing, gates, b.scores, settings)
-    stats = apply_people_coverage(shoot, files, details, gates, settings)
+    people = find_people(shoot, details, settings.face_cluster_threshold)
+    stats = apply_people_coverage(people, files, gates, settings)
+    tag_people(people, files)
     d = {p.rsplit("/", 1)[-1][:-4]: f for p, f in files.items()}
     assert stats == {"people": 2, "people_promoted": 1}
+    assert d["Both"].people == [1] and d["BobBlink"].people == [2]
     assert d["Both"].decision == "keep" and d["Bob2"].decision == "keep"
     assert d["Bob1"].decision == "reject" and d["BobBlink"].decision == "reject"
     assert "only good frame of person #2" in d["Bob2"].reasons[-1]
 
 
-def test_bystanders_do_not_count_as_people():
+def test_similar_faces_cluster_into_one_person():
     from aiculler.people import FaceRef, cluster_people
 
     v = np.asarray(_emb(1, 0))
     w = np.asarray(_emb(0.9, 0.44))  # cosine ~0.9: same person
     groups = cluster_people([FaceRef("a", 0, 0.05, None, v), FaceRef("b", 0, 0.05, None, w)], 0.35)
     assert len(groups) == 1
+
+
+def test_bystanders_are_indexed_but_keep_no_frame():
+    from aiculler.decide import decide
+    from aiculler.people import apply_people_coverage, find_people
+
+    b = ShootBuilder()
+    ids = b.group("burst", [{"name": "A", "sharpness": 100}, {"name": "B", "sharpness": 50}], scene=1)
+    settings = CullSettings(bursts_keep=1)
+    shoot = b.build()
+    tiny = {"box": [0.1, 0.1, 0.12, 0.12], "area": 0.0004, "eyes_closed": 0.1, "embedding": _emb(0, 1, 0, 0)}
+    details = {ids[1]: {"faces": [tiny]}}  # a bystander, only in the rejected frame
+    routing = route(shoot, settings)
+    gates = apply_gates(shoot, routing, settings, b.scores)
+    files = decide(shoot, routing, gates, b.scores, settings)
+    people = find_people(shoot, details, settings.face_cluster_threshold)
+    assert len(people) == 1  # in the index...
+    assert apply_people_coverage(people, files, gates, settings)["people_promoted"] == 0  # ...but not kept for
 
 
 # --------------------------------------------------------------------------- preference

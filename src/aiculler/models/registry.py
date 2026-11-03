@@ -95,6 +95,20 @@ class ModelRegistry:
         """No models: milestone-1 behaviour (exposure, sharpness, clipping only)."""
         return cls.fake({})
 
+    def restrict(self, keys: set[str]) -> "ModelRegistry":
+        """A view of this registry with only ``keys`` usable; every other model reads as "not requested".
+
+        Call it before any engine is loaded: the faces engine is built for the view (tiled search and identity
+        vectors only when AdaFace is in it).
+        """
+        entries = {
+            key: ModelEntry(e.key, e.bundle, e.path, e.revision, e.files, e.digests,
+                            e.problem if key in keys else (e.problem or "not requested"))
+            for key, e in self.entries.items()
+        }
+        engines = {k: v for k, v in self._engines.items() if k in keys}
+        return ModelRegistry(entries, device=self.device, engines=engines, factories=self._factories)
+
     # ------------------------------------------------------------------ queries
 
     def available(self, key: str) -> bool:

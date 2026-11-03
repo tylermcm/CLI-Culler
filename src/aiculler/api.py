@@ -18,6 +18,22 @@ BRACKET_MODES = ("keep_set", "pick_one", "ignore")
 SEQUENCE_MODES = ("keep_all", "cull")
 FEATURELESS_MODES = ("review", "reject", "off")
 NORMALISE_MODES = ("relative", "rank", "zscore")
+# Optional models. The cull is complete without any of them: gates reject the junk, and bursts, brackets and
+# near-duplicate scenes are culled on exposure, sharpness and clipping. Each one adds something:
+#   faces   MediaPipe: blinks and face-crop sharpness count when ranking (contested frames only)
+#   maniqa  MANIQA: technical quality when ranking, and the severe-blur gate (contested frames only)
+#   appeal  Q-ReAlign: aesthetic appeal when ranking (each contested set's shortlist only)
+#   search  TinyCLIP: an image embedding for every readable capture, written to the index for semantic search
+#   people  MediaPipe + AdaFace: every readable capture's faces with identity vectors, clustered into people
+#           and written to the index; also keeps one good frame of each person (keep_people_coverage). Implies faces.
+MODEL_FEATURES = ("faces", "maniqa", "appeal", "search", "people")
+FEATURE_MODELS: dict[str, tuple[str, ...]] = {
+    "faces": ("face_landmarker",),
+    "maniqa": ("maniqa",),
+    "appeal": ("q_realign",),
+    "search": ("tinyclip",),
+    "people": ("face_landmarker", "adaface"),
+}
 
 
 @dataclass
@@ -58,6 +74,8 @@ class CullSettings:
     keep_people_coverage: bool = True  # each recognised person keeps at least one acceptable frame
     face_cluster_threshold: float = 0.35  # AdaFace cosine for one person (the app's FACE_CLUSTER_THRESHOLD)
     gates: GateSettings = field(default_factory=GateSettings)
+    # Optional models to use (MODEL_FEATURES, or "all"); empty: none, the cull runs on the cheap signals alone.
+    models: list[str] = field(default_factory=list)
     # Combined-score weights over set-normalised scores (spec §8: appeal 0.4, technical 0.4 = MANIQA 0.25 +
     # face 0.15, preference low until the harness shows it helps). A signal nobody in a set has is left out of
     # that set's combination, so without models the cheap signals (sharpness, exposure) decide, as in milestone 1.
@@ -65,7 +83,7 @@ class CullSettings:
         "appeal": 0.4, "maniqa": 0.25, "face_sharpness": 0.15, "preference": 0.1, "sharpness": 0.12, "exposure": 0.08,
     })
     appeal_shortlist: int = 3  # Q-ReAlign runs on at most this many per comparison set (at least keep + 1)
-    refine_scenes: bool = True  # split/merge bracketeering's scenes with TinyCLIP (milestone 4)
+    refine_scenes: bool = False  # with "search": also split/merge bracketeering's scenes by TinyCLIP similarity
     split_cos: float = 0.80  # consecutive groups of one scene less similar than this: split
     merge_cos: float = 0.92  # adjacent scenes within merge_window this similar: merge (unless registration contradicts)
     merge_window: float = 120.0  # seconds
@@ -88,6 +106,11 @@ class CullSettings:
             if unknown:
                 raise ValueError(f"unknown gate settings: {', '.join(sorted(unknown))}")
             self.gates = GateSettings(**gates)
+        if isinstance(self.models, str):
+            self.models = [m.strip() for m in self.models.split(",") if m.strip()]
+        if "all" in self.models:
+            self.models = list(MODEL_FEATURES)
+        self.models = list(dict.fromkeys(self.models))
         self.validate()
 
     def validate(self) -> None:
@@ -100,6 +123,8 @@ class CullSettings:
         check("timelapses", self.timelapses, SEQUENCE_MODES)
         check("gates.featureless", self.gates.featureless, FEATURELESS_MODES)
         check("normalise", self.normalise, NORMALISE_MODES)
+        for m in self.models:
+            check("models", m, MODEL_FEATURES + ("all",))
         g = self.gates
         if not 0.0 <= g.clip_region_ignore < g.clip_region_reject <= 1.0:
             raise ValueError("gates: need 0 <= clip_region_ignore < clip_region_reject <= 1")
@@ -117,6 +142,20 @@ class CullSettings:
             raise ValueError(f"review_below must be within 0..1; got {self.review_below!r}")
         if not self.weights or any(float(w) < 0 for w in self.weights.values()):
             raise ValueError("weights must be non-negative and not empty")
+
+    def features(self) -> set[str]:
+        """The model features in effect ("people" implies "faces")."""
+        out = set(self.models)
+        if "people" in out:
+            out.add("faces")
+        return out
+
+    def model_keys(self) -> set[str]:
+        """Registry keys these settings may load."""
+        keys = {k for f in self.features() for k in FEATURE_MODELS[f]}
+        if self.preference_model:
+            keys.add("tinyclip")
+        return keys
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -150,6 +189,7 @@ class FileDecision:
     scores: dict[str, float] = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
     gates: list[str] = field(default_factory=list)  # gates this capture failed, even if rescued or overridden
+    people: list[int] = field(default_factory=list)  # person numbers in this capture (the "people" feature)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -165,6 +205,9 @@ class CullResult:
     timings: dict[str, float]
     stats: dict[str, int] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)
+    # The search and people index (``outputs.write_index``): TinyCLIP embeddings per capture and clustered faces.
+    # Empty unless the "search" / "people" model features ran. Not part of decisions.json (it is large).
+    index: dict = field(default_factory=dict)
 
     @property
     def summary(self) -> dict[str, int]:
@@ -177,6 +220,26 @@ class CullResult:
         from aiculler.outputs import decisions_document
 
         return decisions_document(self)
+
+
+def build_index(shoot, used: dict[str, str], embeddings: dict[str, list[float]], people, settings: CullSettings) -> dict:
+    """The index for semantic and people search: what the "search" and "people" features found, per capture."""
+    index: dict = {}
+    if embeddings:
+        index["search"] = {"model": used.get("tinyclip", ""), "embeddings": dict(embeddings)}
+    if people:
+        index["people"] = {
+            "model": used.get("faces", ""),
+            "threshold": settings.face_cluster_threshold,
+            "faces": [
+                {"capture": f.capture, "index": f.index, "person": f.person, "box": list(f.box), "area": f.area,
+                 "eyes_closed": f.eyes_closed, "embedding": f.vector}
+                for person in people for f in person
+            ],
+        }
+    if index:
+        index["captures"] = {cid: list(c.files) for cid, c in shoot.captures.items()}
+    return index
 
 
 def cull(
@@ -212,7 +275,10 @@ def cull(
     from aiculler.storage import ScoreCache
 
     settings = settings or CullSettings()
-    registry = models if models is not None else ModelRegistry.none()
+    features = settings.features()
+    wanted = settings.model_keys()
+    source = models if models is not None else ModelRegistry.none()
+    registry = source.restrict(wanted)
     progress = on_progress or (lambda stage, done, total: None)
     timings: dict[str, float] = {}
     warnings: list[str] = []
@@ -230,14 +296,21 @@ def cull(
 
         return _Timer()
 
+    def unavailable(name: str, key: str) -> bool:
+        """Warn (once per feature) when a requested model cannot be used."""
+        if registry.available(key):
+            return False
+        problem = registry.entries[key].problem if key in registry.entries else "unknown model"
+        if models is None:
+            problem = "no models given"
+        message = f"{name}: not used ({problem})"
+        if message not in warnings:
+            warnings.append(message)
+        return True
+
     def run_model(name: str, key: str, make, captures) -> bool:
         """Run a model scorer on ``captures``; on any failure to load, warn and carry on without it."""
-        if not captures:
-            return False
-        if not registry.available(key):
-            problem = registry.entries[key].problem if key in registry.entries else "unknown model"
-            if models is not None:
-                warnings.append(f"{name}: not used ({problem})")
+        if not captures or unavailable(name, key):
             return False
         try:
             scorer = make(registry)
@@ -259,8 +332,9 @@ def cull(
     previews = PreviewCache(cache_dir)
     cache = ScoreCache(cache_db) if cache_db else ScoreCache(":memory:")
     preference = None
+    shortlist: set[str] = set()
+    people_on = False
     try:
-        # 1-2. TinyCLIP embeddings (every readable capture), scene refinement.
         from aiculler.scorers.models import AppealScorer, FacesScorer, ManiqaScorer, TinyClipScorer
 
         if settings.preference_model:
@@ -268,7 +342,9 @@ def cull(
 
             preference = PreferenceModel.load(settings.preference_model)
         readable = [cid for cid, c in shoot.captures.items() if not c.error]
-        if settings.refine_scenes or preference is not None:
+
+        # 1. TinyCLIP embeddings (every readable capture: the search index), optional scene refinement.
+        if "search" in features or preference is not None:
             run_model("tinyclip", "tinyclip", TinyClipScorer, readable)
         embeddings = {cid: d["embedding"] for cid, d in store.details.items() if d.get("embedding")}
         scene_stats: dict[str, int] = {}
@@ -278,34 +354,35 @@ def cull(
             with stage("scenes"):
                 scene_stats = refine_scenes(shoot, embeddings, settings)
 
-        # 3. Route.
+        # 2. Route.
         with stage("route"):
             routing = route(shoot, settings)
         candidates = routing.scored_captures()
 
-        # 4. Cheap scores and clear-failure gates.
+        # 3. Cheap scores and clear-failure gates: the core cull needs nothing else.
         with stage("score"):
             run_scorers(store, shoot, candidates, default_scorers(), previews, cache, progress, workers=workers)
         with stage("gates"):
             gates = apply_gates(shoot, routing, settings, store.scores)
         live = contested(routing, gates)
 
-        # 5. Technical: faces (every ungated candidate, for blinks and people coverage), MANIQA (contested only).
-        # Every ungated candidate when people coverage can run (it needs AdaFace); otherwise only contested frames,
-        # the only ones a blink or a sharper face can still change.
-        coverage = settings.keep_people_coverage and registry.available("adaface")
-        face_frames = [c for c in candidates if not gates.failed(c)] if coverage else sorted(live)
-        if settings.require_eyes_open or settings.keep_people_coverage or settings.weights.get("face_sharpness", 0) > 0:
-            run_model("faces", "face_landmarker", FacesScorer, face_frames)
-        if run_model("maniqa", "maniqa", ManiqaScorer, live):
+        # 4. Faces: every readable capture for the people index (with AdaFace), else only contested frames (the
+        # only ones a blink or a sharper face can still change).
+        people_on = "people" in features and not unavailable("people", "adaface")
+        face_frames = readable if people_on else (sorted(live) if "faces" in features else [])
+        run_model("faces", "face_landmarker", FacesScorer, face_frames)
+
+        # 5. MANIQA on contested frames, then the severe-blur gate.
+        if "maniqa" in features and run_model("maniqa", "maniqa", ManiqaScorer, live):
             with stage("gates"):
                 for cid, failure in blur_failures(shoot, routing, gates, store.scores, settings).items():
                     gates.failures.setdefault(cid, []).append(failure)
             live = contested(routing, gates)
 
         # 6. Appeal: Q-ReAlign only on each contested set's technical shortlist.
-        shortlist = appeal_shortlist(routing, gates, store.scores, settings, live) if registry.available("q_realign") else set()
-        run_model("appeal", "q_realign", AppealScorer, shortlist)
+        if "appeal" in features and not unavailable("appeal", "q_realign"):
+            shortlist = appeal_shortlist(routing, gates, store.scores, settings, live)
+            run_model("appeal", "q_realign", AppealScorer, shortlist)
 
         # 7. Preference.
         if preference is not None:
@@ -322,17 +399,23 @@ def cull(
                 used["preference"] = f"{preference.embedding_revision}+n{preference.examples}"
     finally:
         cache.close()
-        if models is not None:
-            registry.close()
+        registry.close()
 
-    # 8. Decide; people coverage.
+    # 8. Decide; people (index and coverage).
     with stage("decide"):
         files = decide(shoot, routing, gates, store.scores, settings)
         people_stats: dict[str, int] = {}
-        if settings.keep_people_coverage and "faces" in used:
-            from aiculler.people import apply_people_coverage
+        people = []
+        if people_on and "faces" in used:
+            from aiculler.people import apply_people_coverage, find_people, tag_people
 
-            people_stats = apply_people_coverage(shoot, files, store.details, gates, settings)
+            people = find_people(shoot, store.details, settings.face_cluster_threshold)
+            if settings.keep_people_coverage:
+                people_stats = apply_people_coverage(people, files, gates, settings)
+            else:
+                people_stats = {"people": len(people)}
+            tag_people(people, files)
+        index = build_index(shoot, used, embeddings if "tinyclip" in used else {}, people, settings)
 
     stats = {
         "captures": len(shoot.captures),
@@ -354,4 +437,5 @@ def cull(
         timings={k: round(v, 3) for k, v in timings.items()},
         stats=stats,
         warnings=warnings,
+        index=index,
     )

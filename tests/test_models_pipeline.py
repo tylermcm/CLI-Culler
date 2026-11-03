@@ -71,7 +71,8 @@ def test_models_decide_between_near_identical_frames(shoot, tmp_path):
     appeal = FakeAppeal({20: 0.4, 30: 0.5, 40: 0.9, 50: 0.95, 60: 0.45})
     faces = FakeFaces({20: [_face(0.1)], 30: [_face(0.95)], 40: [_face(0.1)], 50: [_face(0.1)], 60: [_face(0.1)], 200: [_face(0.1, (0, 1))]})
     reg = ModelRegistry.fake({"maniqa": maniqa, "q_realign": appeal, "face_landmarker": faces})
-    result = cull(shoot, CullSettings(bursts_keep=1, appeal_shortlist=3), models=reg, cache_db=tmp_path / "c.sqlite")
+    result = cull(shoot, CullSettings(bursts_keep=1, appeal_shortlist=3, models=["faces", "maniqa", "appeal"]), models=reg,
+                  cache_db=tmp_path / "c.sqlite")
     d = {p.rsplit("/", 1)[-1]: f for p, f in result.files.items()}
 
     # DSC_0003 (marker 40): technically in the top 3 and most appealing of those -> kept.
@@ -85,13 +86,13 @@ def test_models_decide_between_near_identical_frames(shoot, tmp_path):
     assert 200 not in maniqa.seen and 200 not in appeal.seen and 200 not in faces.seen
     assert result.stats["contested_frames"] == 5 and result.stats["appeal_frames"] == 3
     assert set(result.models) == {"faces", "maniqa", "appeal"} and result.models["maniqa"].startswith("fake-maniqa")
-    assert result.warnings == [f"tinyclip: not used (not provided)"]
+    assert result.warnings == [] and result.index == {}  # TinyCLIP was not asked for: no warning, no index
     assert set(d["DSC_0003.JPG"].scores) >= {"maniqa", "appeal", "face_sharpness", "eyes_closed", "appeal_rel"}
     assert "faces" not in d["DSC_0003.JPG"].scores  # details stay out of decisions.json scores
 
     # Re-running with new settings re-runs no model.
     maniqa.seen.clear(), appeal.seen.clear(), faces.seen.clear()
-    again = cull(shoot, CullSettings(bursts_keep=2, appeal_shortlist=3), models=reg, cache_db=tmp_path / "c.sqlite")
+    again = cull(shoot, CullSettings(bursts_keep=2, appeal_shortlist=3, models=["all"]), models=reg, cache_db=tmp_path / "c.sqlite")
     assert maniqa.seen == [] and faces.seen == [] and again.stats["maniqa_computed"] == 0
     assert sum(f.decision == "keep" for f in again.files.values()) == 3
 
@@ -104,9 +105,16 @@ def test_missing_or_broken_models_degrade_with_a_warning(shoot, tmp_path):
             raise RuntimeError("CUDA out of memory")
 
     reg = ModelRegistry.fake({"maniqa": Broken()})
-    result = cull(shoot, CullSettings(), models=reg, cache_db=tmp_path / "c.sqlite")
+    result = cull(shoot, CullSettings(models=["maniqa", "appeal"]), models=reg, cache_db=tmp_path / "c.sqlite")
     assert result.summary["files"] == 6 and "maniqa" not in result.models
     assert any(w.startswith("maniqa: not used (RuntimeError: CUDA out of memory)") for w in result.warnings)
+    assert "appeal: not used (not provided)" in result.warnings
+    # Models given but none asked for: none runs, none is mentioned.
+    idle = cull(shoot, CullSettings(), models=ModelRegistry.fake({"maniqa": Broken()}), cache_db=tmp_path / "c.sqlite")
+    assert idle.models == {} and idle.warnings == []
+    # Asked for, but no registry: a warning, and the cull carries on.
+    asked = cull(shoot, CullSettings(models=["maniqa"]), cache_db=tmp_path / "c.sqlite")
+    assert asked.warnings == ["maniqa: not used (no models given)"] and asked.summary == result.summary
     # Without a registry at all: milestone-1 behaviour, no warnings.
     plain = cull(shoot, CullSettings(), cache_db=tmp_path / "c.sqlite")
     assert plain.models == {} and plain.warnings == []
@@ -117,12 +125,22 @@ def test_people_coverage_end_to_end(shoot, tmp_path):
     faces = FakeFaces({20: [_face(0.1)], 30: [_face(0.1)], 40: [_face(0.1)], 50: [_face(0.1)], 60: [_face(0.1, bob, area=0.08)],
                        200: [_face(0.1)]})
     reg = ModelRegistry.fake({"face_landmarker": faces, "adaface": object(), "maniqa": FakeManiqa({60: 0.1})})
-    result = cull(shoot, CullSettings(bursts_keep=1), models=reg, cache_db=tmp_path / "c.sqlite")
+    result = cull(shoot, CullSettings(bursts_keep=1, models=["people", "maniqa"]), models=reg, cache_db=tmp_path / "c.sqlite")
     d = {p.rsplit("/", 1)[-1]: f for p, f in result.files.items()}
     # Bob appears only in DSC_0005, which the burst ranking rejected: it is promoted.
     assert d["DSC_0005.JPG"].decision == "keep" and "only good frame of person #2" in d["DSC_0005.JPG"].reasons[-1]
     assert result.stats["people"] == 2 and result.stats["people_promoted"] == 1
-    assert 200 in faces.seen  # with AdaFace, every candidate is searched for people, the lone frame included
+    assert 200 in faces.seen  # with AdaFace, every capture is searched for people, the lone frame included
+    assert d["DSC_0005.JPG"].people == [2] and d["DSC_0100.JPG"].people == [1]
+
+    from aiculler.outputs import load_index, write_index
+
+    index = load_index(write_index(result, tmp_path / "index.npz"))
+    assert index["meta"]["people"] == 2 and "clip" not in index
+    assert len(index["face_person"]) == 6 and index["face_embedding"].shape == (6, 2)
+    bob_row = int(np.flatnonzero(index["face_person"] == 2)[0])
+    assert index["captures"][index["face_capture"][bob_row]] == d["DSC_0005.JPG"].capture
+    assert sorted(index["files"]) == sorted(result.files)
 
 
 def test_tinyclip_scenes_and_preference_end_to_end(tmp_path):
@@ -138,12 +156,14 @@ def test_tinyclip_scenes_and_preference_end_to_end(tmp_path):
                   np.array([1, 1, 0, 0, 0, 0]), embedding_revision=rev, projected_dim=3)
     path = model.save(tmp_path / "pref.joblib")
     reg = ModelRegistry.fake({"tinyclip": clip})
-    result = cull(root, CullSettings(preference_model=str(path)), models=reg, cache_db=tmp_path / "c.sqlite")
+    result = cull(root, CullSettings(preference_model=str(path), models=["search"], refine_scenes=True), models=reg,
+                  cache_db=tmp_path / "c.sqlite")
     d = {p.rsplit("/", 1)[-1]: f for p, f in result.files.items()}
     assert "tinyclip" in result.models and result.models["preference"].startswith(rev)
     assert d["DSC_0001.JPG"].scores["preference"] > d["DSC_0002.JPG"].scores["preference"]
     # Different views by embedding: never one comparison set, whatever bracketeering grouped.
     assert d["DSC_0001.JPG"].decision == d["DSC_0002.JPG"].decision == "keep"
+    assert len(result.index["search"]["embeddings"]) == 3  # every readable capture: the search index
 
 
 # --------------------------------------------------------------------------- registry
@@ -217,12 +237,20 @@ def test_cli_cull_with_models_flag_reports_what_was_used(shoot, tmp_path, fake_a
 
     out = tmp_path / "d.json"
     assert main(["--no-log", "--db", str(tmp_path / "c.sqlite"), "cull", str(shoot), "--quiet", "--out", str(out),
-                 "--models", str(fake_app)]) == 0
+                 "--models", str(fake_app), "--with", "maniqa,appeal"]) == 0
     doc = json.loads(out.read_text())
     err = capsys.readouterr().err
-    assert "q_realign" in err and "not available" in err
+    assert "q_realign" in err and "not available" in err and "tinyclip" not in err  # only what was asked for
     # MANIQA's files are present, but this environment cannot load a real checkpoint from 5 bytes: it degrades.
     assert any(w.startswith("maniqa: not used") for w in doc["warnings"])
+    assert doc["settings"]["models"] == ["maniqa", "appeal"]
+
+    # Without --with, the app is never read: no model problems reported, no warnings.
+    assert main(["--no-log", "--db", str(tmp_path / "c.sqlite"), "cull", str(shoot), "--quiet", "--out", str(out),
+                 "--models", str(fake_app)]) == 0
+    assert "not available" not in capsys.readouterr().err and json.loads(out.read_text())["warnings"] == []
+    with pytest.raises(SystemExit, match="models must be one of"):
+        main(["--no-log", "--db", str(tmp_path / "c.sqlite"), "cull", str(shoot), "--quiet", "--with", "clip"])
 
 
 def test_learn_trains_on_picks_from_past_shoots(tmp_path):

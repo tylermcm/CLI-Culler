@@ -10,24 +10,42 @@ sets. The full design is in bracketeering's `docs/CULLING_ENGINE_SPEC.md`.
 ## Culling a shoot
 
 ```bash
-python -m pip install -e '.[models]'      # or plain -e . to run without models
-ai-culler --db culler.sqlite cull "/shoots/China 8-26" --models ~/src/ImageTriage --out decisions.json [--xmp]
+python -m pip install -e .                 # the cull needs no models
+ai-culler --db culler.sqlite cull "/shoots/China 8-26" --out decisions.json [--xmp]
+ai-culler --db culler.sqlite cull "/shoots/China 8-26" --with search,people --models ~/src/ImageTriage   # + index
 ai-culler --db culler.sqlite evaluate "/shoots/China 8-26" --truth picks --decisions decisions.json --out report.md
 ai-culler --db culler.sqlite learn "/shoots/Japan 4-24" "/shoots/Alaska" --truth picks --out preference.joblib
 ```
 
-**Models** come from the image-triage app's install, never downloaded here (see `docs/MODELS.md`):
-`--models auto` (the installed `image_triage` package), a path to the app, or `none`. Each model the app has
-installed is used; a missing one is skipped with a warning, and `decisions.json` lists the models actually used
-(`models`) and what was skipped (`warnings`). Without models the engine runs on exposure, sharpness and clipping.
+**The cull needs no models.** Gates reject the junk (black misfires, blown skies, washed-out frames, crushed
+shadows), and bursts, brackets and near-duplicate scenes are culled on exposure, sharpness and clipping: that is
+most of the work. Models are optional extras, each asked for by name with `--with` (or `"models"` in the settings):
 
-**Stages**, each on fewer frames than the last: ingest (bracketeering) → TinyCLIP embeddings and scene
-refinement (split at cosine < `split_cos`, merge adjacent scenes ≥ `merge_cos` within `merge_window`) → route →
-cheap scores and gates → faces (MediaPipe: blinks, face-crop sharpness; AdaFace identities) → MANIQA on
-*contested* frames only (those in a set with more candidates than it keeps) → severe-blur gate → Q-ReAlign on
-each contested set's technical shortlist only (`appeal_shortlist`) → preference (`preference_model` from
-`learn`) → decide → people coverage (each person keeps a frame) → `decisions.json` (+ XMP). `stats` reports how
-many frames reached each stage; `timings` the seconds per stage.
+| `--with` | Model | What it adds | Runs on |
+|---|---|---|---|
+| `faces` | MediaPipe Face Landmarker | blinks and face-crop sharpness count when ranking | contested frames |
+| `maniqa` | MANIQA | technical quality when ranking; the severe-blur gate | contested frames |
+| `appeal` | Q-ReAlign | aesthetic appeal when ranking | each contested set's shortlist |
+| `search` | TinyCLIP | an embedding per capture, written to the index for semantic search | every readable capture |
+| `people` | MediaPipe + AdaFace | faces with identities, clustered into people, written to the index; each person keeps a good frame; implies `faces` | every readable capture |
+
+`all` asks for every one. Models come from the image-triage app's install, never downloaded here
+(`--models auto`, the installed `image_triage` package, or `--models PATH` to the app; see `docs/MODELS.md`). A
+model you asked for that is missing or fails to load is skipped with a warning; `decisions.json` lists the
+models actually used (`models`) and what was skipped (`warnings`).
+
+**The index** (`index.npz` next to `decisions.json`, or `--index PATH`), written when `search` or `people` ran:
+TinyCLIP embeddings and faces (box, eyes, AdaFace vector, person number) per capture, with every file of each
+capture, for the app's semantic and people search (`aiculler.outputs.load_index`; arrays documented in
+`write_index`). Each file in `decisions.json` also lists its `people`.
+
+**Stages**, each on fewer frames than the last: ingest (bracketeering) → [TinyCLIP embeddings; with
+`refine_scenes`, scene refinement: split at cosine < `split_cos`, merge adjacent scenes ≥ `merge_cos` within
+`merge_window`] → route → cheap scores and gates → [faces] → [MANIQA on *contested* frames only (those in a set
+with more candidates than it keeps) → severe-blur gate] → [Q-ReAlign on each contested set's technical shortlist
+(`appeal_shortlist`)] → [preference (`preference_model` from `learn`)] → decide → [people: clustering, coverage]
+→ `decisions.json` (+ index, XMP). Bracketed stages run only when asked for. `stats` reports how many frames
+reached each stage; `timings` the seconds per stage.
 
 **XMP** (`--xmp`): keep = 3★, review = yellow label, reject = 1★ + red label. Ratings, labels or ImageTriage
 decisions you set yourself are never overwritten unless `--overwrite-ratings`.

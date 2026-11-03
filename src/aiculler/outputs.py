@@ -1,4 +1,5 @@
-"""Outputs: ``decisions.json`` (schema ``aiculler-decisions/1``). XMP comes in milestone 5."""
+"""Outputs: ``decisions.json`` (schema ``aiculler-decisions/1``), the search/people index (``index.npz``, schema
+``aiculler-index/1``) and XMP sidecars."""
 
 from __future__ import annotations
 
@@ -48,6 +49,80 @@ def load_decisions(path: str | Path) -> dict:
     if doc.get("schema") != SCHEMA:
         raise ValueError(f"{path}: expected schema {SCHEMA}, got {doc.get('schema')!r}")
     return doc
+
+
+# --------------------------------------------------------------------------- index
+
+INDEX_SCHEMA = "aiculler-index/1"
+
+
+def write_index(result: "CullResult", path: str | Path) -> Path | None:
+    """Write the search and people index (numpy ``.npz``); None when no index model ran.
+
+    Arrays (row i of a per-capture array belongs to ``captures[i]``):
+
+    * ``meta``: JSON (schema, engine version, model revisions, face cluster threshold)
+    * ``captures`` (str), ``files`` (str), ``file_capture`` (int, into ``captures``): every file of the shoot
+    * search: ``clip`` (float32, unit length, one row per embedded capture), ``clip_capture`` (int)
+    * people: one row per face: ``face_capture`` (int), ``face_index`` (its position in the capture's faces),
+      ``face_person`` (1-based person number, as in decisions.json), ``face_box`` (left, top, right, bottom as
+      fractions of the upright frame), ``face_area``, ``face_eyes_closed`` (NaN when unknown), ``face_embedding``
+      (AdaFace, unit length)
+    """
+    import numpy as np
+
+    index = result.index or {}
+    if not index:
+        return None
+    captures = list(index["captures"])
+    pos = {cid: i for i, cid in enumerate(captures)}
+    files = [(f, pos[cid]) for cid in captures for f in index["captures"][cid]]
+    meta = {"schema": INDEX_SCHEMA, "engine_version": result.engine_version}
+    arrays: dict[str, object] = {
+        "captures": np.asarray(captures, dtype=str),
+        "files": np.asarray([f for f, _ in files], dtype=str),
+        "file_capture": np.asarray([i for _, i in files], dtype=np.int32),
+    }
+    search = index.get("search")
+    if search:
+        ids = [cid for cid in captures if cid in search["embeddings"]]
+        meta["search_model"] = search["model"]
+        arrays["clip"] = np.asarray([search["embeddings"][c] for c in ids], dtype=np.float32)
+        arrays["clip_capture"] = np.asarray([pos[c] for c in ids], dtype=np.int32)
+    people = index.get("people")
+    if people:
+        faces = people["faces"]
+        meta["people_model"] = people["model"]
+        meta["face_cluster_threshold"] = people["threshold"]
+        meta["people"] = len({f["person"] for f in faces})
+        arrays["face_capture"] = np.asarray([pos[f["capture"]] for f in faces], dtype=np.int32)
+        arrays["face_index"] = np.asarray([f["index"] for f in faces], dtype=np.int32)
+        arrays["face_person"] = np.asarray([f["person"] for f in faces], dtype=np.int32)
+        arrays["face_box"] = np.asarray([f["box"] for f in faces], dtype=np.float32).reshape(-1, 4)
+        arrays["face_area"] = np.asarray([f["area"] for f in faces], dtype=np.float32)
+        arrays["face_eyes_closed"] = np.asarray(
+            [np.nan if f["eyes_closed"] is None else f["eyes_closed"] for f in faces], dtype=np.float32)
+        arrays["face_embedding"] = np.asarray([f["embedding"] for f in faces], dtype=np.float32)
+    arrays["meta"] = np.asarray(json.dumps(meta))
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".tmp.npz")
+    np.savez_compressed(tmp, **arrays)
+    os.replace(tmp, target)
+    return target
+
+
+def load_index(path: str | Path) -> dict:
+    """Read an index written by ``write_index``: {"meta": dict, <array name>: ndarray}."""
+    import numpy as np
+
+    with np.load(path, allow_pickle=False) as data:
+        out = {k: data[k] for k in data.files}
+    meta = json.loads(str(out.pop("meta")))
+    if meta.get("schema") != INDEX_SCHEMA:
+        raise ValueError(f"{path}: expected schema {INDEX_SCHEMA}, got {meta.get('schema')!r}")
+    out["meta"] = meta
+    return out
 
 
 # --------------------------------------------------------------------------- XMP

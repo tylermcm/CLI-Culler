@@ -1,5 +1,8 @@
 # Models: where the app's inference lives
 
+**All optional.** The cull runs without any model; each one is asked for with `--with` (`faces`, `maniqa`,
+`appeal`, `search`, `people`, `all`) or `"models"` in the settings, and only those are loaded (see the README).
+
 **Using them.** `pip install -e '.[models]'` adds the runtime (torch, timm, einops, transformers, mediapipe; the
 app runtime's minimums). Install the model files with the app's Set Up AI, then point the culler at the app:
 `--models /path/to/ImageTriage` (its folder or `image_triage/ai_manifest.py`), or `--models auto` when the

@@ -951,15 +951,26 @@ def _load_cull_settings(args):
         settings.backend = args.backend
     if getattr(args, "exclude", None):
         settings.exclude = list(settings.exclude) + list(args.exclude)
-    settings.validate()
+    if getattr(args, "with_models", None) is not None:
+        settings.models = [m.strip() for m in args.with_models.split(",") if m.strip() and m.strip() != "none"]
+        if "all" in settings.models:
+            from aiculler.api import MODEL_FEATURES
+
+            settings.models = list(MODEL_FEATURES)
+    try:
+        settings.validate()
+    except ValueError as exc:
+        raise SystemExit(f"ai-culler: {exc}") from exc
     return settings
 
 
-def _load_registry(args):
+def _load_registry(args, keys: set[str] | None = None):
+    """The app's models, or None. ``keys``: the models the run will use (problems are reported only for those;
+    an empty set loads nothing); None: all of them."""
     from aiculler.models.registry import ModelRegistry, ModelUnavailable
 
     choice = (args.models or "auto").strip()
-    if choice.casefold() == "none":
+    if choice.casefold() == "none" or keys == set():
         return None
     try:
         registry = ModelRegistry.from_app_manifest(None if choice.casefold() == "auto" else choice, device=args.device)
@@ -969,7 +980,8 @@ def _load_registry(args):
             return None
         raise SystemExit(f"ai-culler: {exc}") from exc
     for key, problem in registry.problems().items():
-        print(f"models: {key} not available: {problem}", file=sys.stderr)
+        if keys is None or key in keys:
+            print(f"models: {key} not available: {problem}", file=sys.stderr)
     return registry
 
 
@@ -992,7 +1004,7 @@ def _run_cull(args, logger: RunLogger | None = None):
             last[stage] = done
             print(f"[{stage}] {done}/{total}", file=sys.stderr)
 
-    registry = _load_registry(args)
+    registry = _load_registry(args, settings.model_keys())
     try:
         result = cull(
             folders,
@@ -1023,6 +1035,17 @@ def command_cull(args) -> int:
     path = write_decisions(result, args.out)
     s = result.summary
     print(f"{s['files']} files: {s['keep']} keep, {s['reject']} reject, {s['review']} review -> {path}")
+    if result.index:
+        from aiculler.outputs import write_index
+
+        index_path = write_index(result, args.index or Path(args.out).with_name("index.npz"))
+        parts = []
+        if "search" in result.index:
+            parts.append(f"{len(result.index['search']['embeddings'])} embeddings")
+        if "people" in result.index:
+            faces = result.index["people"]["faces"]
+            parts.append(f"{len(faces)} faces, {len({f['person'] for f in faces})} people")
+        print(f"index: {', '.join(parts)} -> {index_path}")
     if args.xmp:
         from aiculler.outputs import write_xmp
 
@@ -1298,13 +1321,22 @@ def build_parser() -> argparse.ArgumentParser:
             "--models",
             default="auto",
             help="Where the app's models are: 'auto' (the installed image-triage app), a path to the app "
-            "(its folder or ai_manifest.py), or 'none' (no models: exposure, sharpness and clipping only)",
+            "(its folder or ai_manifest.py), or 'none'. Only read when --with (or the settings' \"models\") asks for a model",
+        )
+        p.add_argument(
+            "--with",
+            dest="with_models",
+            metavar="LIST",
+            help="Optional models to use, comma-separated (overrides the settings' \"models\"): faces (blinks, face "
+            "sharpness), maniqa (quality, blur gate), appeal (Q-ReAlign), search (TinyCLIP embeddings for semantic "
+            "search), people (AdaFace identities, people coverage); 'all' or 'none'. Default: none; the cull needs no models",
         )
         p.add_argument("--device", default="auto", help="Model device: auto, cpu or cuda")
 
     cull_cmd = subparsers.add_parser("cull", help="Cull a shoot: keep / reject / review per file, with reasons")
     add_cull_args(cull_cmd)
     cull_cmd.add_argument("--out", type=Path, default=Path("decisions.json"), help="decisions.json path")
+    cull_cmd.add_argument("--index", type=Path, help="Search/people index path (default: index.npz next to --out); written when search or people ran")
     cull_cmd.add_argument("--xmp", action="store_true", help="Also write decisions to XMP sidecars (keep 3*, review yellow, reject 1* red)")
     cull_cmd.add_argument("--overwrite-ratings", action="store_true", help="With --xmp: replace ratings/labels you set yourself")
     cull_cmd.set_defaults(func=command_cull)
