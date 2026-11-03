@@ -166,40 +166,72 @@ def match_paths(entries: list[tuple[str, Truth]], paths: list[str], capture_of: 
 # --------------------------------------------------------------------------- picks
 
 
-def picks_truth(decisions: dict) -> TruthSet:
-    """Kept = bracketeering merged a copy or edited export of the capture from another folder.
+CARD_FOLDER = re.compile(r"^\d{3}[A-Za-z0-9_]{5}$")  # DCF camera folders: 100NIKON, 104ND800, 100CANON, 100_FUJI
+# A folder holding copies of more of the shoot than this, and at least BULK_MIN copies, is a backup, not final picks.
+PICKS_MAX_SHARE = 0.25
+BULK_MIN = 50
 
-    A non-primary file in the shot's own folder is a sidecar (the JPEG of RAW+JPEG) and does not count.
-    Captures whose primary file lives in one of those pick/export folders are exports bracketeering could
-    not merge with their original: they are not shots of the shoot and are left out of the metrics.
+
+def picks_truth(decisions: dict, pick_folders: list[str] | None = None, max_share: float = PICKS_MAX_SHARE) -> TruthSet:
+    """Kept = bracketeering merged a copy or edited export of the capture from a pick/export folder.
+
+    Candidate folders are those holding copies of captures that live elsewhere. A non-primary file in the shot's
+    own folder is a sidecar (the JPEG of RAW+JPEG) and never counts. Unless ``pick_folders`` names the folders
+    (by folder name), two kinds of copy folder are not picks: camera card folders (``104ND800``) and bulk copies
+    (at least ``BULK_MIN`` copies covering more than ``max_share`` of the shoot: a backup or a second dump).
+
+    Captures whose primary file lives in a pick folder are exports bracketeering could not merge with their
+    original: they are not shots of the shoot and are left out of the metrics.
     """
     files_of: dict[str, list[tuple[str, bool]]] = defaultdict(list)
     for path, d in decisions["files"].items():
         files_of[d["capture"]].append((path, bool(d["primary"])))
-    pick_folders: dict[str, int] = defaultdict(int)
-    picked: dict[str, list[str]] = {}
-    primary_of: dict[str, str] = {}
+    primary_of = {cap: next((p for p, prim in files if prim), files[0][0]) for cap, files in files_of.items()}
+    copies: dict[str, set[str]] = defaultdict(set)  # folder -> captures with a copy there
+    outside_of: dict[str, list[str]] = {}
     for cap, files in files_of.items():
-        primary = next((p for p, prim in files if prim), files[0][0])
-        primary_of[cap] = primary
-        home = Path(primary).parent
+        home = Path(primary_of[cap]).parent
         outside = [p for p, prim in files if not prim and Path(p).parent != home]
         if outside:
-            picked[cap] = outside
-            for folder in {str(Path(p).parent) for p in outside}:
-                pick_folders[folder] += 1
+            outside_of[cap] = outside
+            for p in outside:
+                copies[str(Path(p).parent)].add(cap)
+
+    n = max(1, len(files_of))
+    chosen: dict[str, int] = {}
+    skipped: list[str] = []
+    wanted = {f.strip().casefold() for f in pick_folders or [] if f.strip()}
+    for folder, caps in sorted(copies.items()):
+        name = Path(folder).name
+        if wanted:
+            if name.casefold() in wanted:
+                chosen[folder] = len(caps)
+            continue
+        if CARD_FOLDER.match(name):
+            skipped.append(f"{name}/ ({len(caps)}, camera card folder)")
+        elif len(caps) / n > max_share and len(caps) >= BULK_MIN:
+            skipped.append(f"{name}/ ({len(caps)} = {len(caps) / n:.0%} of the shoot: a backup, not picks)")
+        else:
+            chosen[folder] = len(caps)
+
     truth: dict[str, Truth] = {}
-    for cap, outside in picked.items():
-        where = ", ".join(sorted({Path(p).parent.name + "/" for p in outside}))
-        truth[primary_of[cap]] = Truth(state="kept", note=f"picked (copy in {where})", source="picks")
+    for cap, outside in outside_of.items():
+        in_picks = [p for p in outside if str(Path(p).parent) in chosen]
+        if in_picks:
+            where = ", ".join(sorted({Path(p).parent.name + "/" for p in in_picks}))
+            truth[primary_of[cap]] = Truth(state="kept", note=f"picked (copy in {where})", source="picks")
     excluded = {
         cap: f"in pick/export folder {Path(primary).parent.name}/ but not merged with an original"
         for cap, primary in primary_of.items()
-        if cap not in picked and str(Path(primary).parent) in pick_folders
+        if primary_of[cap] not in truth and str(Path(primary).parent) in chosen
     }
-    notes = [f"pick folders: " + ", ".join(f"{Path(f).name}/ ({n})" for f, n in sorted(pick_folders.items()))] if pick_folders else [
-        "no copies or exports outside the shots' folders were found: nothing is picked"
-    ]
+    notes = []
+    if chosen:
+        notes.append("pick folders: " + ", ".join(f"{Path(f).name}/ ({k})" for f, k in sorted(chosen.items())))
+    else:
+        notes.append("no pick or export folders found: nothing is picked" + (f" (asked for: {', '.join(sorted(wanted))})" if wanted else ""))
+    if skipped:
+        notes.append("not counted as picks: " + "; ".join(skipped) + " (name the pick folders with --pick-folder to override)")
     if excluded:
         notes.append(f"{len(excluded)} capture(s) in pick folders could not be matched to an original and are left out")
     return TruthSet(truth, "picks (copies/exports merged by bracketeering)", mode="picks", unlabelled="not_kept", excluded=excluded, notes=notes)
@@ -460,6 +492,7 @@ def load_truth(
     truth_file: str | Path | None = None,
     session: str | None = None,
     unlabelled: str | None = None,
+    pick_folders: list[str] | None = None,
 ) -> TruthSet:
     """``source`` is one of SOURCES, or a path: ``*.csv``, ``*.lrcat``, ``*.sqlite3`` (ImageTriage)."""
     name = str(source)
@@ -474,7 +507,7 @@ def load_truth(
         if not truth_file or not Path(truth_file).is_file():
             raise ValueError(f"--truth {kind} needs --truth-file pointing at an existing file")
     if kind == "picks":
-        ts = picks_truth(decisions)
+        ts = picks_truth(decisions, pick_folders)
     elif kind == "csv":
         ts = csv_truth(truth_file, decisions)
     elif kind == "triage":

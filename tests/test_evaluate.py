@@ -277,3 +277,25 @@ def test_report_lists_picks_the_gates_reject_and_their_margins():
     report = render_report(ev)
     assert "## Gates vs your picked frames" in report and "Rejected by a gate: **1**" in report
     assert "| sky_blown | `sky_blown` | 60% | p1.NEF | 70% | **no** |" in report
+
+
+def test_picks_ignore_card_folders_and_bulk_copies():
+    """Alaska Aug '21: originals copied to card folders (104ND800/) and a duplicate dump (Tyler's photos/)
+    next to real export folders (Bears/, Eagles/)."""
+    files = {}
+    for i in range(200):
+        cap = f"c{i}"
+        files[f"/s/Alaska/DSC_{i:04d}.NEF"] = _file(cap, f"S{i}", "single", None, "keep")
+        files[f"/s/Tyler's photos/DSC_{i:04d}.NEF"] = _file(cap, f"S{i}", "single", None, "keep", primary=False)
+        if i < 60:
+            files[f"/s/104ND800/DSC_{i:04d}.JPG"] = _file(cap, f"S{i}", "single", None, "keep", primary=False)
+    files["/s/Bears/DSC_0005-edit.jpg"] = _file("c5", "S5", "single", None, "keep", primary=False)
+    files["/s/Eagles/DSC_0150.jpg"] = _file("c150", "S150", "single", None, "keep", primary=False)
+    files["/s/Bears/unmatched-crop.jpg"] = _file("x", "SX", "single", None, "keep")  # an export with no original
+    ts = load_truth("picks", _doc(files))
+    assert set(ts.truth) == {"/s/Alaska/DSC_0005.NEF", "/s/Alaska/DSC_0150.NEF"}
+    assert ts.notes[0] == "pick folders: Bears/ (1), Eagles/ (1)"
+    assert "104ND800/ (60, camera card folder)" in ts.notes[1] and "Tyler's photos/ (200 = 100% of the shoot" in ts.notes[1]
+    assert ts.excluded == {"x": "in pick/export folder Bears/ but not merged with an original"}  # originals stay in
+    only = load_truth("picks", _doc(files), pick_folders=["eagles"])
+    assert set(only.truth) == {"/s/Alaska/DSC_0150.NEF"}

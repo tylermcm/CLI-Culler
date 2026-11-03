@@ -1053,6 +1053,7 @@ def command_evaluate(args) -> int:
             truth_file=args.truth_file,
             session=args.triage_session,
             unlabelled=None if args.unlabelled == "auto" else args.unlabelled,
+            pick_folders=args.pick_folder,
         )
     except ValueError as exc:
         raise SystemExit(f"evaluate: {exc}") from exc
@@ -1317,6 +1318,8 @@ def build_parser() -> argparse.ArgumentParser:
         "xmp, lrcat; or a .csv / .lrcat / ImageTriage decisions.sqlite3 path",
     )
     evaluate_cmd.add_argument("--truth-file", help="File for --truth csv / lrcat; for triage, a decisions.sqlite3 other than the default")
+    evaluate_cmd.add_argument("--pick-folder", action="append", default=[],
+                              help="With --truth picks: a folder name holding your final picks (repeat); default: found automatically")
     evaluate_cmd.add_argument("--triage-session", help="ImageTriage session (profile preset); default: the one with most rows for this shoot")
     evaluate_cmd.add_argument(
         "--unlabelled",
