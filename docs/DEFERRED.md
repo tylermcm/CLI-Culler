@@ -4,7 +4,7 @@ Unusual cases noticed while tuning, deliberately left until every stage (faces, 
 people coverage) is in, so they are judged against the full pipeline rather than patched one at a time.
 Each has a regression test or a measurement to re-check against.
 
-## 1. Coloured light sources count as clipped highlights (China 8-26, `_DSC1055`)
+## 1. Coloured light sources count as clipped highlights (China 8-26, `_DSC1055`): **done (option 1)**
 
 - **What:** a portrait framed by a glowing yellow light ring; the face is well exposed. A final pick.
 - **Measured** (any channel >= 250, the current rule): 44% of pixels clipped, largest region 24%, top third 53–59%.
@@ -18,8 +18,11 @@ Each has a regression test or a measurement to re-check against.
      cannot reject (at most a penalty).
   3. Scene type via TinyCLIP (night portrait with practical lights, high-key, silhouette) if 1–2 leave misses.
 - **Check:** re-run `evaluate` on China 8-26 and every other shoot with truth; no pick may be gated.
+- **Done:** gates count only pixels blown to white (every channel near 255); saturated colour (`sat_region`) costs
+  the clip penalty only. `_DSC1055`: 0.8% blown. No pick gated on any shoot. Its scene-mates are no longer
+  wrongly gated either, so it now loses its scene on sharpness (RESULTS.md); options 2–3 are not needed for gating.
 
-## 2. Bracketeering warnings send too much to review (Alaska Aug '21)
+## 2. Bracketeering warnings send too much to review (Alaska Aug '21): **done**
 
 - **What:** 36% of Alaska's files go to review, almost all because of "partial bracket: N of 7 slots" (and
   "frames don't register"). The spec sends any warned group to review. 19 of Alaska's 20 picks are among them;
@@ -27,17 +30,27 @@ Each has a regression test or a measurement to re-check against.
 - **Options:** treat "partial bracket" as information, not doubt about the grouping (only low confidence and
   grouping-doubt warnings go to review); or review only when the warned group would be rejected.
 - **Check:** Alaska review rate and keep-or-review recall vs plain recall.
+- **Done:** `review_warnings: doubt` (default): only a weak bracket candidate, a flagged auto-bracket with no
+  partners, or an unknown warning sends a group to review; the rest are noted. Alaska review 35.9% → 2.0%.
 
-## 3. Brackets of a moving subject are alternatives, not HDR sets (Alaska Aug '21)
+## 3. Brackets of a moving subject are alternatives, not HDR sets (Alaska Aug '21): **done**
 
 - **What:** the wildlife was shot with auto-bracketing on. Each pick is one frame of a bracket; `keep_set` keeps
   the whole bracket and `pick_one` keeps the best-exposed frame, which may not be the picked one.
 - **Options:** a bracket bracketeering flags "frames don't register (subject or camera moving)" competes like a
   burst (its frames ranked against each other, never on exposure alone); or a `brackets: as_burst` setting.
 - **Check:** Alaska recall with picks in `Bears/`, `Eagles/`, `Re-edits/`.
+- **Done:** `moving_brackets: as_burst` (default). Alaska recall 5% → 75% (with §2).
 
-## 4. China 8-26 precision against ImageTriage decisions is 18%
+## 4. China 8-26 precision against ImageTriage decisions is 18%: **open, needs a decision**
 
 - The engine keeps 46% of the frames you decided on; you accepted 12%. Lone frames (kept with nothing to compare
   against), whole brackets, and the second burst frame (`bursts_keep` 2) make up most of it. Revisit with keep
   counts (§8 question 3) and an absolute-quality floor once Q-ReAlign is in.
+
+- **Measured** (RESULTS.md): lone frames, kept because nothing competes with them, are 39–78% of every shoot's
+  keeps; `bursts_keep: 1` gains China 2 points of precision and costs Alaska 10 points of recall.
+- **The decision:** "reject only clear failures" keeps every lone frame that passes the gates. Raising precision
+  means rejecting some frames that failed nothing, by one of: an absolute quality floor (needs a model: MANIQA or
+  Q-ReAlign, so only with `--with`); sending weak lone frames to review instead of keep; or a keep budget per
+  shoot (compares across the shoot, against the first rule). None is implemented.

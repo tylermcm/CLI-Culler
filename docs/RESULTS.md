@@ -44,3 +44,41 @@ Runtime with faces + MANIQA (first run; cached after): Alaska 7 min for 2,707 ca
 misses on China it is choosing a technically better neighbour over the moment the user chose (Q-ReAlign's job).
 On Alaska no pick was rejected: 19 of 20 went to review, because every pick is a frame of a camera auto-bracket
 (wildlife shot with bracketing on) carrying a "partial bracket" warning; see `DEFERRED.md` §2-3.
+
+## Four shoots, core cull (no models) after the DEFERRED §1–3 fixes
+
+Defaults now: no models; `review_warnings: doubt` (§2); `moving_brackets: as_burst` (§3); highlight gates count
+only pixels blown to white, saturated colour costs score (§1). Runtime with no models: 1.5 min (China, Japan,
+WhiteSands) to 2 min (Alaska) on first run, clipping re-measured; seconds after.
+
+| Shoot | Truth | Before (milestone 2, no models) | Now | Keep rate | Review rate |
+|---|---|---|---|---|---|
+| China 8-26 | picks (18) | 72.2% | 66.7% | 39.2% → 42.9% | 5.7% → 0.6% |
+| China 8-26 | ImageTriage (29 of 246) | recall 72.4%, precision 18.3% | recall 69.0%, precision 17.5% | 46.8% → 46.3% | 0% |
+| Alaska Aug '21 | picks (20) | **5.0%** (100% keep or review) | **75.0%** | 36.5% → 56.6% | **35.9% → 2.0%** |
+| Japan 4-24 | – | – | – | 66.7% → 81.9% | 17.0% → 0.8% |
+| WhiteSands '26 | – | – | – | 43.0% → 50.4% | 11.3% → 2.8% |
+
+No pick or ImageTriage keep is rejected by a gate on any shoot.
+
+**China's lost pick is `_DSC1055`**, and the old result was luck: the four other frames of its scene (181)
+share the yellow light ring and were *rejected by the clipping gate* (36–52% "clipped"). With saturated colour
+no longer a failure they compete again, and three are sharper and better exposed. It is now the same kind of
+miss as the other five (DSC_1360, _DSC0570, _DSC0808, _DSC0822, _DSC1088): a moment the user chose over a
+technically better neighbour, which no cheap signal can see (`--with appeal` is for this).
+
+**Alaska**: the moving-bracket rule ranks each wildlife bracket's frames like a burst, and "partial bracket" is
+no longer a reason for review. 15 of 20 picks are automatic keeps.
+
+**Keep counts (§4).** `bursts_keep: 1` instead of 2: China precision 17.5% → 19.8% (recall unchanged), but Alaska
+recall 75% → 65% (moving brackets keep one frame). The default stays 2. What the engine keeps, by reason:
+
+| Shoot | Kept captures | Lone frame (only unit in its scene) | Bracket (keep_set) | Burst / moving-bracket survivors | Scene winners | Other |
+|---|---|---|---|---|---|---|
+| China 8-26 | 488 | 53% | 14% | 15% | 18% | – |
+| Alaska Aug '21 | 1,533 | 60% | 27% | 7% | 3% | 2% sequences |
+| Japan 4-24 | 435 | 78% | 5% | 13% | 3% | – |
+| WhiteSands '26 | 462 | 39% | 8% | 36% | 6% | 11% sequences |
+
+Lone frames that pass every gate are kept because nothing competes with them ("reject only clear failures"):
+they bound precision. See DEFERRED §4.
