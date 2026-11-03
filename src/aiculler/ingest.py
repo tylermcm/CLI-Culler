@@ -116,9 +116,14 @@ def ingest(
     from bracketeering.report import to_dict
 
     run = analyze or bracketeering.analyze
-    paths = folder if isinstance(folder, list) else [folder]
-    groups, unreadable = run([Path(p).resolve() for p in paths], backend=backend, pixels=True, exclude=list(exclude), workers=workers)
+    roots = [Path(p).expanduser().resolve() for p in (folder if isinstance(folder, list) else [folder])]
+    missing = [str(r) for r in roots if not r.exists()]
+    if missing:
+        raise FileNotFoundError(f"shoot folder not found: {', '.join(missing)}")
+    groups, unreadable = run(roots, backend=backend, pixels=True, exclude=list(exclude), workers=workers)
     report = to_dict(groups, unreadable)
+    if not report["files"]:
+        raise ValueError(f"no image files found in {', '.join(str(r) for r in roots)}")
     errors = {e["file"]: e["error"] for e in report["errors"]}
 
     shoot_groups: dict[str, GroupInfo] = {}

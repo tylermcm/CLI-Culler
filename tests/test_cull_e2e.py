@@ -116,3 +116,19 @@ def test_evaluate_picks_end_to_end(tmp_path):
     assert m["sets"]["burst"]["hit_rate"] == 1.0 and m["sets"]["scene"]["hit_rate"] == 0.0
     text = report.read_text()
     assert "_winners/ (2)" in text and "DSC_0011.JPG | reject | picked (copy in _winners/)" in text
+
+
+def test_cli_expands_quoted_tilde_and_rejects_missing_or_empty_folders(shoot, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(shoot.parent))
+    out = tmp_path / "d.json"
+    db = str(tmp_path / "c.sqlite")
+    assert main(["--no-log", "--db", db, "cull", "~/shoot", "--out", str(out), "--quiet"]) == 0  # as if quoted: "~/shoot"
+    assert load_decisions(out)["summary"]["files"] == 12
+
+    with pytest.raises(SystemExit, match="shoot folder not found: .*nope"):
+        main(["--no-log", "--db", db, "cull", "~/nope", "--out", str(tmp_path / "x.json"), "--quiet"])
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(SystemExit, match="no image files found"):
+        main(["--no-log", "--db", db, "cull", str(empty), "--out", str(tmp_path / "y.json"), "--quiet"])
+    assert not (tmp_path / "x.json").exists() and not (tmp_path / "y.json").exists()

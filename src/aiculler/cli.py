@@ -958,6 +958,11 @@ def _load_cull_settings(args):
 def _run_cull(args, logger: RunLogger | None = None):
     from aiculler.api import cull
 
+    folders = [Path(f).expanduser() for f in args.folder]
+    for folder in folders:
+        if not folder.is_dir():
+            raise SystemExit(f"ai-culler: shoot folder not found: {folder}")
+
     settings = _load_cull_settings(args)
     last: dict[str, int] = {}
 
@@ -969,14 +974,17 @@ def _run_cull(args, logger: RunLogger | None = None):
             last[stage] = done
             print(f"[{stage}] {done}/{total}", file=sys.stderr)
 
-    result = cull(
-        list(args.folder),
-        settings,
-        cache_db=args.db,
-        cache_dir=args.cache,
-        on_progress=on_progress,
-        workers=args.workers,
-    )
+    try:
+        result = cull(
+            folders,
+            settings,
+            cache_db=args.db,
+            cache_dir=args.cache,
+            on_progress=on_progress,
+            workers=args.workers,
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        raise SystemExit(f"ai-culler: {exc}") from exc
     if logger is not None:
         logger.event("cull_summary", {"summary": result.summary, "timings": result.timings, "stats": result.stats})
     return result
