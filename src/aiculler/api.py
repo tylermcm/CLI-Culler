@@ -291,7 +291,10 @@ def cull(
         live = contested(routing, gates)
 
         # 5. Technical: faces (every ungated candidate, for blinks and people coverage), MANIQA (contested only).
-        face_frames = [c for c in candidates if not gates.failed(c)] if settings.keep_people_coverage else sorted(live)
+        # Every ungated candidate when people coverage can run (it needs AdaFace); otherwise only contested frames,
+        # the only ones a blink or a sharper face can still change.
+        coverage = settings.keep_people_coverage and registry.available("adaface")
+        face_frames = [c for c in candidates if not gates.failed(c)] if coverage else sorted(live)
         if settings.require_eyes_open or settings.keep_people_coverage or settings.weights.get("face_sharpness", 0) > 0:
             run_model("faces", "face_landmarker", FacesScorer, face_frames)
         if run_model("maniqa", "maniqa", ManiqaScorer, live):

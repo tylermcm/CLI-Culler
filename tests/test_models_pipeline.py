@@ -81,8 +81,8 @@ def test_models_decide_between_near_identical_frames(shoot, tmp_path):
     # DSC_0002 (30) blinked.
     assert any("eyes closed (0.95)" in r for r in d["DSC_0002.JPG"].reasons)
     assert "more appealing" in d["DSC_0001.JPG"].reasons[0]
-    # Cheap -> expensive: the lone frame never reaches MANIQA or Q-ReAlign; faces see it (people coverage).
-    assert 200 not in maniqa.seen and 200 not in appeal.seen and 200 in faces.seen
+    # Cheap -> expensive: the lone frame reaches no model (without AdaFace there is no people coverage to need it).
+    assert 200 not in maniqa.seen and 200 not in appeal.seen and 200 not in faces.seen
     assert result.stats["contested_frames"] == 5 and result.stats["appeal_frames"] == 3
     assert set(result.models) == {"faces", "maniqa", "appeal"} and result.models["maniqa"].startswith("fake-maniqa")
     assert result.warnings == [f"tinyclip: not used (not provided)"]
@@ -116,12 +116,13 @@ def test_people_coverage_end_to_end(shoot, tmp_path):
     bob = (0.0, 1.0)
     faces = FakeFaces({20: [_face(0.1)], 30: [_face(0.1)], 40: [_face(0.1)], 50: [_face(0.1)], 60: [_face(0.1, bob, area=0.08)],
                        200: [_face(0.1)]})
-    reg = ModelRegistry.fake({"face_landmarker": faces, "maniqa": FakeManiqa({60: 0.1})})
+    reg = ModelRegistry.fake({"face_landmarker": faces, "adaface": object(), "maniqa": FakeManiqa({60: 0.1})})
     result = cull(shoot, CullSettings(bursts_keep=1), models=reg, cache_db=tmp_path / "c.sqlite")
     d = {p.rsplit("/", 1)[-1]: f for p, f in result.files.items()}
     # Bob appears only in DSC_0005, which the burst ranking rejected: it is promoted.
     assert d["DSC_0005.JPG"].decision == "keep" and "only good frame of person #2" in d["DSC_0005.JPG"].reasons[-1]
     assert result.stats["people"] == 2 and result.stats["people_promoted"] == 1
+    assert 200 in faces.seen  # with AdaFace, every candidate is searched for people, the lone frame included
 
 
 def test_tinyclip_scenes_and_preference_end_to_end(tmp_path):

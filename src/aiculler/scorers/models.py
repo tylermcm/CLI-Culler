@@ -44,7 +44,8 @@ class FacesScorer:
     def __init__(self, registry):
         self.registry = registry
         adaface = registry.revision("adaface") if registry.available("adaface") else "none"
-        self.revision = f"landmarker:{registry.revision('face_landmarker')}+adaface:{adaface}+tiles+crop{FACE_CROP}-v1"
+        search = "tiles" if adaface != "none" else "whole"  # tiled small-face search only for people coverage
+        self.revision = f"landmarker:{registry.revision('face_landmarker')}+adaface:{adaface}+{search}+crop{FACE_CROP}-v1"
 
     def score(self, batch) -> list[dict]:
         engine = self.registry.engine("face_landmarker")

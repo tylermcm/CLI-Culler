@@ -169,7 +169,10 @@ class FacesEngine:
 
         width, height = image.size
         windows = [(0, 0, width, height)]
-        if min(width, height) >= 480:
+        # The tiled search finds faces too small for the whole-frame pass, for the People index (AdaFace). Without
+        # the recognizer there is no people coverage, and blinks only count faces >= 1% of the frame, which the
+        # whole-frame pass finds: that is the app's blink check (BlinkEngine), at a fraction of the cost.
+        if self.recognizer is not None and min(width, height) >= 480:
             for size, count in ((0.6, 3), (0.4, 4), (0.27, 5)):
                 part_w, part_h = int(width * size), int(height * size)
                 for row in range(count):
