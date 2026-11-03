@@ -943,6 +943,90 @@ def _parse_label(label: str) -> int:
     raise SystemExit("label must be keep/k/1 or reject/r/0")
 
 
+def _load_cull_settings(args):
+    from aiculler.api import CullSettings
+
+    settings = CullSettings.from_json(args.settings) if getattr(args, "settings", None) else CullSettings()
+    if getattr(args, "backend", None):
+        settings.backend = args.backend
+    if getattr(args, "exclude", None):
+        settings.exclude = list(settings.exclude) + list(args.exclude)
+    settings.validate()
+    return settings
+
+
+def _run_cull(args, logger: RunLogger | None = None):
+    from aiculler.api import cull
+
+    settings = _load_cull_settings(args)
+    last: dict[str, int] = {}
+
+    def on_progress(stage: str, done: int, total: int) -> None:
+        if args.quiet or total <= 0:
+            return
+        step = max(1, total // 10)
+        if done == total or done - last.get(stage, -step) >= step:
+            last[stage] = done
+            print(f"[{stage}] {done}/{total}", file=sys.stderr)
+
+    result = cull(
+        args.folder,
+        settings,
+        cache_db=args.db,
+        cache_dir=args.cache,
+        on_progress=on_progress,
+        workers=args.workers,
+    )
+    if logger is not None:
+        logger.event("cull_summary", {"summary": result.summary, "timings": result.timings, "stats": result.stats})
+    return result
+
+
+def command_cull(args) -> int:
+    from aiculler.outputs import write_decisions
+
+    logger = _open_logger(args)
+    result = _run_cull(args, logger)
+    path = write_decisions(result, args.out)
+    s = result.summary
+    print(f"{s['files']} files: {s['keep']} keep, {s['reject']} reject, {s['review']} review -> {path}")
+    print("timings: " + ", ".join(f"{k} {v:.2f}s" for k, v in result.timings.items()))
+    logger.summary({"out": str(path), "summary": s})
+    logger.close()
+    return 0
+
+
+def command_evaluate(args) -> int:
+    from aiculler.evaluate import evaluate, load_truth, render_report
+    from aiculler.outputs import decisions_document, load_decisions, write_decisions
+
+    logger = _open_logger(args)
+    if args.decisions and args.decisions.exists() and not args.rerun:
+        decisions = load_decisions(args.decisions)
+    else:
+        result = _run_cull(args, logger)
+        if args.decisions:
+            write_decisions(result, args.decisions)
+        decisions = decisions_document(result)
+    truth, source = load_truth(args.truth, list(decisions["files"]))
+    ev = evaluate(decisions, truth, keep_min_rating=args.keep_min_rating, truth_source=source)
+    report = render_report(ev, shoot=str(args.folder), worst=args.worst)
+    _write_text(args.out, report)
+    if args.metrics_out:
+        args.metrics_out.parent.mkdir(parents=True, exist_ok=True)
+        args.metrics_out.write_text(json.dumps(ev.summary, indent=2) + "\n", encoding="utf-8")
+    s = ev.summary
+    print(
+        f"precision {s['precision']}, recall {s['recall']}, review rate {s['review_rate']}, "
+        f"burst hit rate {s['sets']['burst']['hit_rate']}, scene hit rate {s['sets']['scene']['hit_rate']}"
+        + (f" -> {args.out}" if args.out else ""),
+        file=sys.stderr,
+    )
+    logger.summary({"summary": s})
+    logger.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ai-culler", description="Headless offline photo culling engine")
     parser.add_argument("--db", default="aiculler.sqlite", type=Path, help="SQLite database path")
@@ -1121,6 +1205,31 @@ def build_parser() -> argparse.ArgumentParser:
     policy.add_argument("--score-threshold", type=float, help="Keep files with final_score >= threshold")
     stage.add_argument("--include-unscored", action="store_true", help="Allow staging before sort has set final scores")
     stage.set_defaults(func=command_stage)
+
+    def add_cull_args(p) -> None:
+        p.add_argument("folder", type=Path, help="Shoot folder")
+        p.add_argument("--settings", type=Path, help="CullSettings JSON (defaults if omitted)")
+        p.add_argument("--cache", type=Path, help="Preview cache directory (default: next to --db)")
+        p.add_argument("--backend", choices=["auto", "exiftool", "native"], help="bracketeering metadata backend")
+        p.add_argument("--exclude", action="append", default=[], help="Folder name to skip; repeat for several")
+        p.add_argument("--workers", type=int)
+        p.add_argument("--quiet", action="store_true", help="No progress output")
+
+    cull_cmd = subparsers.add_parser("cull", help="Cull a shoot: keep / reject / review per file, with reasons")
+    add_cull_args(cull_cmd)
+    cull_cmd.add_argument("--out", type=Path, default=Path("decisions.json"), help="decisions.json path")
+    cull_cmd.set_defaults(func=command_cull)
+
+    evaluate_cmd = subparsers.add_parser("evaluate", help="Report agreement with the shoot's Lightroom ratings")
+    add_cull_args(evaluate_cmd)
+    evaluate_cmd.add_argument("--truth", required=True, help="'xmp' or a read-only copy of a Lightroom .lrcat")
+    evaluate_cmd.add_argument("--decisions", type=Path, help="Existing decisions.json to evaluate (else cull runs, and writes it here if given)")
+    evaluate_cmd.add_argument("--rerun", action="store_true", help="Re-run cull even if --decisions exists")
+    evaluate_cmd.add_argument("--keep-min-rating", type=int, default=3, help="Stars at or above which a frame counts as kept")
+    evaluate_cmd.add_argument("--worst", type=int, default=25, help="Disagreements to list per direction")
+    evaluate_cmd.add_argument("--out", type=Path, help="report.md path (default: stdout)")
+    evaluate_cmd.add_argument("--metrics-out", type=Path, help="Optional metrics JSON")
+    evaluate_cmd.set_defaults(func=command_evaluate)
 
     return parser
 
