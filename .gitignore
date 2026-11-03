@@ -19,7 +19,7 @@ env/
 .env.*
 
 # Local model weights and downloaded datasets
-models/
+/models/
 *.onnx
 *.safetensors
 *.pt
