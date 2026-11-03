@@ -201,8 +201,24 @@ def test_low_confidence_or_warned_group_goes_to_review():
     assert {d[f"U{i}"].decision for i in range(3)} == {"review"}
     assert "review instead of auto-reject: grouping confidence 0.55 < 0.7" in d["U0"].reasons[-1]
     assert "review instead of auto-keep" in d["U1"].reasons[-1]
+    # A partial bracket is still a bracket: noted, decided as usual.
+    assert {d[n].decision for n in ("B1", "B2", "B3")} == {"keep"}
+    assert d["B1"].reasons[-1] == "note: bracketeering: partial bracket: 3 of 5 slots"
+    d, _ = run(b, CullSettings(bursts_keep=1, review_warnings="all"))
     assert {d[n].decision for n in ("B1", "B2", "B3")} == {"review"}
     assert "partial bracket" in d["B1"].reasons[-1]
+
+
+def test_warnings_that_doubt_the_grouping_go_to_review():
+    b = ShootBuilder()
+    b.group("single", [{"name": "W", "sharpness": 50}], scene=1, warnings=["weak bracket candidate (0.41) below threshold"])
+    b.group("single", [{"name": "F", "sharpness": 50}], scene=2, warnings=["flagged auto bracket but no partner frames found"])
+    b.group("single", [{"name": "P", "sharpness": 50}], scene=3,
+            warnings=["auto-bracket frame (slot +1) without partners: rest of its cycle recomposed or deleted"])
+    d, _ = run(b)
+    assert d["W"].decision == d["F"].decision == "review" and d["P"].decision == "keep"
+    d, _ = run(b, CullSettings(review_warnings="none"))
+    assert {x.decision for x in d.values()} == {"keep"}
 
 
 def test_gate_rejection_survives_review_override():

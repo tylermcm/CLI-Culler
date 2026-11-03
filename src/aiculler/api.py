@@ -18,6 +18,7 @@ BRACKET_MODES = ("keep_set", "pick_one", "ignore")
 SEQUENCE_MODES = ("keep_all", "cull")
 FEATURELESS_MODES = ("review", "reject", "off")
 NORMALISE_MODES = ("relative", "rank", "zscore")
+REVIEW_WARNING_MODES = ("doubt", "all", "none")
 # Optional models. The cull is complete without any of them: gates reject the junk, and bursts, brackets and
 # near-duplicate scenes are culled on exposure, sharpness and clipping. Each one adds something:
 #   faces   MediaPipe: blinks and face-crop sharpness count when ranking (contested frames only)
@@ -67,7 +68,11 @@ class CullSettings:
     scene_keep: int = 1  # best N units per near-duplicate scene; 0 = scenes not reduced
     focus_stacks: str = "keep_all"  # keep_all | cull
     timelapses: str = "keep_all"  # keep_all | cull
-    review_below: float = 0.7  # group confidence below this, or warnings -> review
+    review_below: float = 0.7  # group confidence below this -> review
+    # Which bracketeering warnings send a group to review: "doubt" (only those that doubt the grouping itself, e.g.
+    # a weak bracket candidate split into singles; "partial bracket", "frames don't register" and the like are
+    # noted in the reasons but decided as usual), "all", or "none".
+    review_warnings: str = "doubt"
     require_eyes_open: bool = True  # blinks count against a frame; in group shots, any prominent face
     blink_threshold: float = 0.6  # eyes-closed score at or above this is a blink (the app's BLINK_THRESHOLD)
     blink_penalty: float = 0.3  # combined-score points a blink costs
@@ -123,6 +128,7 @@ class CullSettings:
         check("timelapses", self.timelapses, SEQUENCE_MODES)
         check("gates.featureless", self.gates.featureless, FEATURELESS_MODES)
         check("normalise", self.normalise, NORMALISE_MODES)
+        check("review_warnings", self.review_warnings, REVIEW_WARNING_MODES)
         for m in self.models:
             check("models", m, MODEL_FEATURES + ("all",))
         g = self.gates

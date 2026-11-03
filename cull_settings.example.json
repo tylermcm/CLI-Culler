@@ -5,6 +5,7 @@
   "focus_stacks": "keep_all",
   "timelapses": "keep_all",
   "review_below": 0.7,
+  "review_warnings": "doubt",
   "require_eyes_open": true,
   "keep_people_coverage": true,
   "models": [],

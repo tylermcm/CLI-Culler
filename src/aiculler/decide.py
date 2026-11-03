@@ -7,8 +7,9 @@ Order of operations (each capture gets exactly one decision):
    the rest follow the burst's outcome in its scene. The best frame represents the burst.
 3. Scenes: units ranked against each other on their representative frame; the top ``scene_keep`` win.
    If every unit in a scene failed a gate, the least-bad one is kept for review (never a black frame).
-4. Review overrides: groups with confidence < ``review_below`` or bracketeering warnings, and frames
-   flagged by a gate (featureless), go to review instead of an automatic keep/reject. Gate rejections stay.
+4. Review overrides: groups with confidence < ``review_below`` or a bracketeering warning that doubts the
+   grouping (``review_warnings``), and frames flagged by a gate (featureless), go to review instead of an
+   automatic keep/reject. Gate rejections stay. Other warnings are noted in the reasons.
 
 Scores are normalised within the comparison set they compete in, never across the shoot.
 """
@@ -38,6 +39,17 @@ RELATIVE_SCALE = {
     "preference": ("linear", 0.5),  # probability the user keeps it
 }
 SHORTLIST_METRICS = frozenset({"appeal", "preference"})
+# Bracketeering warnings that describe a group without doubting it: a bracket missing slots, frames that don't
+# register (a moving subject: see moving_brackets), an auto-bracket frame whose partners were recomposed or deleted.
+# Any other warning (a weak bracket candidate split into singles, a flagged auto-bracket frame with no partners
+# found, or one this version does not know) doubts the grouping and sends the group to review.
+INFORMATIONAL_WARNINGS = ("partial bracket", "possibly incomplete", "frames don't register", "auto-bracket frame")
+
+
+def is_informational(warning: str) -> bool:
+    return warning.startswith(INFORMATIONAL_WARNINGS)
+
+
 MISSING = 0.5  # a candidate without a value (no preview) is scored as the set's middle
 
 
@@ -214,7 +226,12 @@ def decide(
         why = []
         if g.confidence < settings.review_below:
             why.append(f"grouping confidence {g.confidence:.2f} < {settings.review_below:g}")
-        why.extend(f"bracketeering warning: {w}" for w in g.warnings)
+        doubts = [w for w in g.warnings if settings.review_warnings == "all" or
+                  (settings.review_warnings == "doubt" and not is_informational(w))]
+        why.extend(f"bracketeering warning: {w}" for w in doubts)
+        notes = [w for w in g.warnings if w not in doubts]
+        for cid in g.captures if notes else ():
+            st[cid].reasons.append("note: " + "; ".join(f"bracketeering: {w}" for w in notes))
         if not why:
             continue
         for cid in g.captures:
