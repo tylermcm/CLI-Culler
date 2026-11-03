@@ -105,3 +105,25 @@ but also good frames it dislikes for their content: sharp bear close-ups against
 DSC_9815, 0.184), a night portrait (_DSC1739, 0.133), mist (_DSC1694, 0.195), the torii path (DSC_6945, 0.177).
 No absolute reject level from these four shoots is safe, so both levels default to off; set them from a
 labelled baseline (`ai-culler sample` / `calibrate`).
+
+## Floor modes compared on existing culls (first look, before the labelled baseline)
+
+Library baseline (`ai-culler baseline`) over the four shoots: 2,066 competing frames with MANIQA and TinyCLIP
+categories (landscape 752, architecture 357, night 331, street 265, animals 188, interior 148, food_product 145,
+portrait 133, macro 117, people 79). Category check by eye: right for portraits, people, night, landscapes,
+architecture, streets and interiors; flower fields come out as "macro".
+
+Labels from what already exists: China's ImageTriage decisions and picks, Alaska's picks; 246 of them are frames
+the floor can judge (Alaska's picks are almost all bracket frames, which it never judges): 31 keep, 215 reject.
+
+| Mode | Rejects caught, every keep safe | Rejects caught, 95% of keeps safe |
+|---|---|---|
+| `raw` (A) | 16 of 215 | 21 |
+| `shoot` | 16 | 21 |
+| `category` (B) | 12 | 25 |
+| `technique` (C) | **25** | **26** |
+
+**Reading, with care.** `technique` catches the most with every keep safe, but these are 31 keeps, nearly all from
+one shoot: a difference of a few frames is noise. And ImageTriage's rejects are mostly frames that lost to a better
+neighbour, not junk: no floor should catch them, which is why every mode catches few. The labelled baseline
+(keep / borderline / reject judged frame by frame, spread across categories) is the real test.
