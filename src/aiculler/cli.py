@@ -1130,6 +1130,43 @@ def command_learn(args) -> int:
     return 0
 
 
+def command_sample(args) -> int:
+    from aiculler.baseline import make_sample
+
+    folders = [Path(f).expanduser() for f in args.folder]
+    for folder in folders:
+        if not folder.is_dir():
+            raise SystemExit(f"ai-culler: folder not found: {folder}")
+    registry = _load_registry(args, {"maniqa"})
+    try:
+        doc = make_sample(folders, args.out, n=args.n, seed=args.seed, models=registry, cache_db=args.db,
+                          cache_dir=args.cache, workers=args.workers)
+    except (ValueError, FileNotFoundError) as exc:
+        raise SystemExit(f"ai-culler: {exc}") from exc
+    for w in doc["warnings"]:
+        print(f"warning: {w}", file=sys.stderr)
+    for folder, k in doc["per_folder"].items():
+        print(f"{folder}: {k} of {doc['candidates_per_folder'][folder]} competing frames")
+    print(f"{doc['drawn']} frames -> {args.out / 'label.html'} (open it, label every frame, export labels.csv into {args.out})")
+    return 0
+
+
+def command_calibrate(args) -> int:
+    from aiculler.baseline import calibrate, read_labels, render_calibration
+
+    sample = json.loads((args.sample / "sample.json").read_text(encoding="utf-8"))
+    labels_path = args.labels or args.sample / "labels.csv"
+    try:
+        cal = calibrate(sample, read_labels(labels_path), margin=args.margin, review_share=args.review_share)
+    except (ValueError, FileNotFoundError) as exc:
+        raise SystemExit(f"ai-culler calibrate: {exc}") from exc
+    report = render_calibration(cal)
+    _write_text(args.out, report)
+    s = cal["suggested"]
+    print(f"suggested: quality_reject {s['quality_reject']}, quality_review {s['quality_review']} ({cal['labelled']} labelled frames)", file=sys.stderr)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ai-culler", description="Headless offline photo culling engine")
     parser.add_argument("--db", default="aiculler.sqlite", type=Path, help="SQLite database path")
@@ -1366,6 +1403,25 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_cmd.add_argument("--out", type=Path, help="report.md path (default: stdout)")
     evaluate_cmd.add_argument("--metrics-out", type=Path, help="Optional metrics JSON")
     evaluate_cmd.set_defaults(func=command_evaluate)
+
+    sample_cmd = subparsers.add_parser("sample", help="Draw a random sample across shoots for a labelled quality baseline")
+    sample_cmd.add_argument("folder", type=Path, nargs="+", help="Shoot folders (each one shoot); equal shares from each")
+    sample_cmd.add_argument("--n", type=int, default=100, help="Frames to draw in all (default 100)")
+    sample_cmd.add_argument("--seed", type=int, default=1, help="Random seed (the same seed draws the same sample)")
+    sample_cmd.add_argument("--out", type=Path, required=True, help="Folder for label.html, thumbs/ and sample.json")
+    sample_cmd.add_argument("--cache", type=Path, help="Preview cache directory (default: next to --db)")
+    sample_cmd.add_argument("--models", default="auto", help="Where the app's models are (as for cull); MANIQA scores the sample")
+    sample_cmd.add_argument("--device", default="auto")
+    sample_cmd.add_argument("--workers", type=int)
+    sample_cmd.set_defaults(func=command_sample)
+
+    calibrate_cmd = subparsers.add_parser("calibrate", help="Suggest quality floor levels from a labelled sample")
+    calibrate_cmd.add_argument("sample", type=Path, help="The folder ai-culler sample wrote")
+    calibrate_cmd.add_argument("--labels", type=Path, help="labels.csv exported from label.html (default: in the sample folder)")
+    calibrate_cmd.add_argument("--margin", type=float, default=0.02, help="quality_reject sits this far below the lowest keep/borderline")
+    calibrate_cmd.add_argument("--review-share", type=float, default=0.10, help="At most this share of keeps below quality_review")
+    calibrate_cmd.add_argument("--out", type=Path, help="calibration.md path (default: stdout)")
+    calibrate_cmd.set_defaults(func=command_calibrate)
 
     learn_cmd = subparsers.add_parser("learn", help="Train a preference model (TinyCLIP) from your past culls")
     learn_cmd.add_argument("folder", type=Path, nargs="+", help="Shoot folders with past culls (each one shoot)")
