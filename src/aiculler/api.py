@@ -192,7 +192,7 @@ class CullSettings:
         return "maniqa" in self.models and g.quality_mode in ("category", "technique") and (g.quality_reject > 0 or g.quality_review > 0)
 
     def needs_tinyclip(self) -> bool:
-        return "search" in self.features() or bool(self.preference_model) or self.category_floor()
+        return "search" in self.features() or bool(self.preference_model) or self.category_floor() or self.refine_scenes
 
     def model_keys(self) -> set[str]:
         """Registry keys these settings may load."""
