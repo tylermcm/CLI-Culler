@@ -24,8 +24,14 @@ NORMALISE_MODES = ("relative", "rank", "zscore")
 class GateSettings:
     """Thresholds for clear failures only. Everything else is a score."""
 
-    black_mean: float = 0.02  # mean preview luma below this: black frame / misfire
-    highlights_clipped: float = 0.25  # fraction of clipped pixels above this: unusable
+    black_mean: float = 0.02  # mean preview luma below this: black frame / misfire (always a reject)
+    # Highlights, by connected clipped region (never applied to bracket frames):
+    clip_region_ignore: float = 0.05  # largest clipped region below this fraction of the frame: no penalty
+    clip_region_reject: float = 0.25  # ...at or above this: reject; in between, a score penalty
+    clip_penalty: float = 0.15  # penalty (combined-score points) at clip_region_reject, linear from 0 at clip_region_ignore
+    sky_blown: float = 0.60  # clipped fraction of the top third at or above this: reject ("sky blown out")
+    washed_mean: float = 0.80  # mean luma at or above this...
+    washed_spread: float = 0.15  # ...and tonal spread (p95 - p5) at or below this: reject ("washed out")
     shadows_crushed: float = 0.60  # fraction of crushed pixels above this: unusable
     # A featureless preview is a black misfire, a blank frame, or a moon in an empty sky; only the
     # first is a clear failure, so by default it goes to review instead of being rejected.
@@ -53,7 +59,16 @@ class CullSettings:
 
     def __post_init__(self) -> None:
         if isinstance(self.gates, dict):
-            self.gates = GateSettings(**self.gates)
+            gates = dict(self.gates)
+            if "highlights_clipped" in gates:
+                raise ValueError(
+                    "gates.highlights_clipped was replaced by region rules: clip_region_ignore, clip_region_reject, "
+                    "clip_penalty, sky_blown, washed_mean, washed_spread"
+                )
+            unknown = set(gates) - {f.name for f in fields(GateSettings)}
+            if unknown:
+                raise ValueError(f"unknown gate settings: {', '.join(sorted(unknown))}")
+            self.gates = GateSettings(**gates)
         self.validate()
 
     def validate(self) -> None:
@@ -66,6 +81,11 @@ class CullSettings:
         check("timelapses", self.timelapses, SEQUENCE_MODES)
         check("gates.featureless", self.gates.featureless, FEATURELESS_MODES)
         check("normalise", self.normalise, NORMALISE_MODES)
+        g = self.gates
+        if not 0.0 <= g.clip_region_ignore < g.clip_region_reject <= 1.0:
+            raise ValueError("gates: need 0 <= clip_region_ignore < clip_region_reject <= 1")
+        if g.clip_penalty < 0:
+            raise ValueError("gates.clip_penalty must be >= 0")
         for name in ("bursts_keep", "scene_keep"):
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -106,6 +126,7 @@ class FileDecision:
     score: float | None = None  # combined score, comparable only within comparison_set
     scores: dict[str, float] = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
+    gates: list[str] = field(default_factory=list)  # gates this capture failed, even if rescued or overridden
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -185,7 +206,7 @@ def cull(
         cache.close()
 
     t = time.perf_counter()
-    gates = apply_gates(shoot, routing, settings)
+    gates = apply_gates(shoot, routing, settings, scores)
     timings["gates"] = time.perf_counter() - t
 
     t = time.perf_counter()

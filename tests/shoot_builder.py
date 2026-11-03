@@ -53,6 +53,9 @@ class ShootBuilder:
             if "sharpness" in fr:
                 values["sharpness"] = fr["sharpness"]
             values["exposure"] = fr.get("exposure", 1.0)
+            for key in ("clip_region", "top_clip", "luma_mean", "luma_spread"):
+                if key in fr:
+                    values[key] = fr[key]
             self.scores[cid] = values
             ids.append(cid)
         rep = representative if representative is not None else (len(frames) // 2 if kind != "single" else 0)
@@ -85,7 +88,7 @@ def run(builder: ShootBuilder, settings=None):
     settings = settings or CullSettings()
     shoot = builder.build()
     routing = route(shoot, settings)
-    gates = apply_gates(shoot, routing, settings)
+    gates = apply_gates(shoot, routing, settings, builder.scores)
     files = decide(shoot, routing, gates, builder.scores, settings)
     by_name = {path.rsplit("/", 1)[-1].rsplit(".", 1)[0]: d for path, d in files.items() if d.primary}
     return by_name, files

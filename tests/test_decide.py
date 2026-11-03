@@ -52,7 +52,7 @@ def test_bracket_frames_are_never_gated_on_exposure():
     b = ShootBuilder()
     b.group(
         "exposure",
-        [{"name": "B1", "mean": 0.01}, {"name": "B2", "hl": 0.6}, {"name": "B3", "sh": 0.9}],
+        [{"name": "B1", "mean": 0.01}, {"name": "B2", "hl": 0.6, "clip_region": 0.6, "top_clip": 1.0}, {"name": "B3", "sh": 0.9}],
         representative=0,
         best_exposed=0,
     )
@@ -153,18 +153,19 @@ def test_near_identical_frames_get_near_identical_scores():
 def test_gate_rejects_clear_failures_only():
     b = ShootBuilder()
     b.single("Black", scene=3, sharpness=500, mean=0.01)
-    b.single("Clipped", scene=3, sharpness=500, hl=0.4)
+    b.single("Clipped", scene=3, sharpness=500, clip_region=0.4)
     b.single("Fine", scene=3, sharpness=100)
     d, _ = run(b)
     assert d["Black"].decision == "reject" and "black frame" in d["Black"].reasons[0]
-    assert d["Clipped"].decision == "reject" and "unusable clipping" in d["Clipped"].reasons[0]
+    assert d["Clipped"].decision == "reject" and "one clipped region covers 40% of the frame" in d["Clipped"].reasons[0]
+    assert d["Clipped"].gates == ["clip_region"]
     assert d["Fine"].decision == "keep"
 
 
 def test_whole_scene_failing_gates_keeps_least_bad_for_review():
     b = ShootBuilder()
-    b.single("A", scene=3, sharpness=100, hl=0.5)
-    b.single("B", scene=3, sharpness=300, hl=0.3)
+    b.single("A", scene=3, sharpness=100, clip_region=0.5)
+    b.single("B", scene=3, sharpness=300, clip_region=0.3)
     b.single("C", scene=3, sharpness=900, mean=0.005)  # black: never rescued
     d, _ = run(b)
     assert d["B"].decision == "review"
@@ -181,7 +182,7 @@ def test_lone_black_frame_is_rejected_not_rescued():
 
 def test_burst_entirely_gated_is_rescued_when_alone_in_scene():
     b = ShootBuilder()
-    b.group("burst", [{"name": "U0", "sharpness": 50, "hl": 0.5}, {"name": "U1", "sharpness": 80, "hl": 0.4}], scene=1)
+    b.group("burst", [{"name": "U0", "sharpness": 50, "clip_region": 0.5}, {"name": "U1", "sharpness": 80, "top_clip": 0.7}], scene=1)
     d, _ = run(b)
     assert d["U1"].decision == "review" and d["U0"].decision == "reject"
     assert not any(r.startswith("rejected:") for r in d["U1"].reasons)
@@ -266,3 +267,70 @@ def test_passthrough_sequences_are_kept():
     d, _ = run(b)
     assert {x.decision for x in d.values()} == {"keep"}
     assert "focus_stacks: keep_all" in d["F0"].reasons[0]
+
+
+# --------------------------------------------------------------------------- highlights by region
+
+
+def test_small_clipped_regions_cost_nothing_however_much_clips_overall():
+    b = ShootBuilder()
+    # 40% of pixels clipped overall, but in specks (largest region 3%): no gate, no penalty.
+    b.single("Specks", scene=1, sharpness=100, hl=0.4, clip_region=0.03, top_clip=0.3)
+    b.single("Clean", scene=1, sharpness=100, clip_region=0.0)
+    d, _ = run(b)
+    assert d["Specks"].gates == [] and "clip_penalty" not in d["Specks"].scores
+    assert d["Specks"].score == d["Clean"].score
+
+
+def test_mid_sized_region_is_a_score_penalty_only():
+    b = ShootBuilder()
+    b.single("Mid", scene=1, sharpness=100, clip_region=0.15)  # halfway between 5% and 25%
+    b.single("Clean", scene=1, sharpness=100, clip_region=0.0)
+    d, _ = run(b)
+    assert d["Mid"].gates == [] and d["Mid"].scores["clip_penalty"] == 0.075
+    assert d["Mid"].decision == "reject" and d["Clean"].decision == "keep"
+    assert d["Mid"].reasons[-1] == "score -0.07: one clipped region covers 15% of the frame"
+    # A sharper frame still wins despite the penalty: it is a nudge, not a gate.
+    b = ShootBuilder()
+    b.single("Mid", scene=1, sharpness=400, clip_region=0.15)
+    b.single("Clean", scene=1, sharpness=100, clip_region=0.0)
+    d, _ = run(b)
+    assert d["Mid"].decision == "keep"
+
+
+def test_region_sky_and_washed_out_gates():
+    b = ShootBuilder()
+    b.single("Region", scene=1, sharpness=900, clip_region=0.25)
+    b.single("Sky", scene=1, sharpness=900, clip_region=0.2, top_clip=0.6)
+    b.single("Washed", scene=1, sharpness=900, luma_mean=0.85, luma_spread=0.1)
+    b.single("Bright", scene=1, sharpness=900, luma_mean=0.85, luma_spread=0.4)  # high-key but contrasty: fine
+    b.single("Fine", scene=1, sharpness=10)
+    d, _ = run(b, CullSettings(scene_keep=2))
+    assert d["Region"].gates == ["clip_region"]
+    assert d["Sky"].gates == ["sky_blown"] and "sky blown out (60% of the top third clipped" in d["Sky"].reasons[0]
+    assert d["Washed"].gates == ["washed_out"] and "washed out" in d["Washed"].reasons[0]
+    assert d["Bright"].gates == [] and d["Bright"].decision == "keep"
+    assert d["Fine"].decision == "keep"  # the only other frame that passed the gates
+
+
+def test_region_thresholds_are_configurable():
+    b = ShootBuilder()
+    b.single("Sky", scene=1, sharpness=900, top_clip=0.7, clip_region=0.3)
+    b.single("Other", scene=1, sharpness=10)
+    d, _ = run(b, CullSettings(gates=GateSettings(clip_region_reject=0.35, sky_blown=0.8)))
+    assert d["Sky"].gates == [] and d["Sky"].decision == "keep"
+
+
+def test_old_highlights_setting_is_refused_with_a_pointer():
+    import pytest
+
+    with pytest.raises(ValueError, match="replaced by region rules"):
+        CullSettings.from_dict({"gates": {"highlights_clipped": 0.3}})
+
+
+def test_bracket_frames_never_get_the_clip_penalty():
+    b = ShootBuilder()
+    b.group("exposure", [{"name": "B1", "sharpness": 100, "clip_region": 0.2}], scene=1, best_exposed=0)
+    b.single("S1", scene=1, sharpness=100, clip_region=0.0)
+    d, _ = run(b)
+    assert "clip_penalty" not in d["B1"].scores and d["B1"].gates == []

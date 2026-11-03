@@ -9,7 +9,12 @@
   "keep_people_coverage": true,
   "gates": {
     "black_mean": 0.02,
-    "highlights_clipped": 0.25,
+    "clip_region_ignore": 0.05,
+    "clip_region_reject": 0.25,
+    "clip_penalty": 0.15,
+    "sky_blown": 0.6,
+    "washed_mean": 0.8,
+    "washed_spread": 0.15,
     "shadows_crushed": 0.6,
     "featureless": "review"
   },

@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from aiculler.gates import GateResults
+from aiculler.gates import GateResults, clip_penalty
 from aiculler.ingest import Shoot
 from aiculler.routing import ComparisonSet, Routing, Unit
 
@@ -66,16 +66,23 @@ def normalise(values: dict[str, float | None], metric: str, method: str = "relat
 
 
 def combine(
-    captures: list[str], scores: dict[str, dict[str, float]], weights: dict[str, float], method: str
+    captures: list[str],
+    scores: dict[str, dict[str, float]],
+    weights: dict[str, float],
+    method: str,
+    penalties: dict[str, float] | None = None,
 ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
-    """Combined score per capture within one set, plus each metric's set-normalised value."""
+    """Combined score per capture within one set (minus penalties), plus each metric's set-normalised value."""
     rel: dict[str, dict[str, float]] = {c: {} for c in captures}
     for metric in weights:
         normed = normalise({c: scores.get(c, {}).get(metric) for c in captures}, metric, method)
         for c in captures:
             rel[c][metric] = normed[c]
     total = sum(weights.values()) or 1.0
-    combined = {c: round(sum(w * rel[c][m] for m, w in weights.items()) / total, 4) for c in captures}
+    pen = penalties or {}
+    combined = {
+        c: round(max(0.0, sum(w * rel[c][m] for m, w in weights.items()) / total - pen.get(c, 0.0)), 4) for c in captures
+    }
     return combined, rel
 
 
@@ -128,6 +135,14 @@ def decide(
     weights = {k: float(v) for k, v in settings.weights.items() if float(v) > 0}
     method = settings.normalise
     st: dict[str, _State] = {cid: _State() for cid in shoot.captures}
+    # Mid-sized clipped regions cost a little score; never on bracket frames.
+    penalties: dict[str, float] = {}
+    for cid, values in scores.items():
+        if shoot.group_of(cid).kind == "exposure":
+            continue
+        pen = clip_penalty(values, settings)
+        if pen > 0:
+            penalties[cid] = pen
 
     # 1. Unreadable and passthrough.
     for cid, err in routing.unreadable.items():
@@ -138,11 +153,11 @@ def decide(
     # 2. Bursts.
     burst_survivors: dict[str, list[str]] = {}
     for b in routing.bursts:
-        _rank_burst(shoot, b, routing.units[b.id], gates, scores, weights, method, st, burst_survivors)
+        _rank_burst(shoot, b, routing.units[b.id], gates, scores, weights, method, st, burst_survivors, penalties)
 
     # 3. Scenes.
     for s in routing.scenes:
-        _rank_scene(shoot, s, routing, gates, scores, weights, method, settings, st, burst_survivors)
+        _rank_scene(shoot, s, routing, gates, scores, weights, method, settings, st, burst_survivors, penalties)
 
     # 4. Review overrides.
     for g in shoot.groups.values():
@@ -175,8 +190,15 @@ def decide(
         g = shoot.groups[cap.group]
         s_ = st[f.capture]
         raw = {k: v for k, v in scores.get(f.capture, {}).items()}
+        if raw and cap.exposure is not None:  # the preview stats the black and shadow gates use
+            raw["preview_mean"] = cap.exposure.mean
+            raw["shadows_crushed"] = cap.exposure.shadows_crushed
         rel = {f"{k}_rel": v for k, v in s_.rel.items()}
         reasons = list(s_.reasons)
+        pen = penalties.get(f.capture, 0.0)
+        if pen > 0:
+            raw["clip_penalty"] = pen
+            reasons.append(f"score -{pen:.2f}: one clipped region covers {scores[f.capture]['clip_region']:.0%} of the frame")
         if not f.primary:
             reasons.append(f"follows its shot {Path(cap.primary).name}")
         out[path] = FileDecision(
@@ -193,12 +215,13 @@ def decide(
             score=s_.score,
             scores={**raw, **rel},
             reasons=reasons,
+            gates=[x.gate for x in gates.failures.get(f.capture, [])],
         )
     return out
 
 
-def _rank_burst(shoot, b: ComparisonSet, unit: Unit, gates, scores, weights, method, st, survivors) -> None:
-    combined, rel = combine(b.members, scores, weights, method)
+def _rank_burst(shoot, b: ComparisonSet, unit: Unit, gates, scores, weights, method, st, survivors, penalties) -> None:
+    combined, rel = combine(b.members, scores, weights, method, penalties)
     index = {c: i for i, c in enumerate(b.members)}
     order = sorted(b.members, key=lambda c: (gates.failed(c), -combined[c], index[c]))
     ok = [c for c in order if not gates.failed(c)]
@@ -227,10 +250,10 @@ def _rank_burst(shoot, b: ComparisonSet, unit: Unit, gates, scores, weights, met
             )
 
 
-def _rank_scene(shoot, s: ComparisonSet, routing, gates, scores, weights, method, settings, st, survivors) -> None:
+def _rank_scene(shoot, s: ComparisonSet, routing, gates, scores, weights, method, settings, st, survivors, penalties) -> None:
     units = [routing.units[u] for u in s.members]
     reps = [u.rep for u in units]
-    combined, rel = combine(reps, scores, weights, method)
+    combined, rel = combine(reps, scores, weights, method, penalties)
     solo = len(units) == 1
     scene_name = f"scene {s.scene}" if s.scene is not None else "its scene"
 

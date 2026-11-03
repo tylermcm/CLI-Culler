@@ -1,9 +1,13 @@
 """Gates: reject only clear failures.
 
-Milestone 1 gates use bracketeering's preview exposure stats:
+Gates on the preview:
 
-* black frame / misfire: mean luma < ``black_mean``
-* unusable clipping: ``highlights_clipped`` > threshold or ``shadows_crushed`` > threshold
+* black frame / misfire: mean luma < ``black_mean`` (always a reject)
+* highlights, by connected clipped region (``scorers.clipping``): one region >= ``clip_region_reject`` of the
+  frame, or >= ``sky_blown`` of the top third clipped ("sky blown out"), or a washed-out frame (mean luma >=
+  ``washed_mean`` and tonal spread <= ``washed_spread``). Smaller regions (``clip_region_ignore`` up to
+  ``clip_region_reject``) cost a score penalty in ``decide``; below ``clip_region_ignore``, nothing.
+* unusable shadows: ``shadows_crushed`` > threshold
 * featureless preview: by default a review flag, not a rejection (a moon in an empty sky is featureless too)
 
 Severe blur needs MANIQA (milestone 2) and is not gated yet.
@@ -45,7 +49,34 @@ class GateResults:
         return bool(fails) and all(f.gate == BLACK for f in fails)
 
 
-def apply_gates(shoot: Shoot, routing: Routing, settings: "CullSettings") -> GateResults:
+def highlight_failures(values: dict[str, float], settings: "CullSettings") -> list[GateFailure]:
+    """Region-aware highlight gates from the clipping scorer's values (nothing when they are missing)."""
+    g = settings.gates
+    out: list[GateFailure] = []
+    region, top = values.get("clip_region"), values.get("top_clip")
+    mean, spread = values.get("luma_mean"), values.get("luma_spread")
+    if region is not None and region >= g.clip_region_reject:
+        out.append(GateFailure("clip_region", f"one clipped region covers {region:.0%} of the frame (>= {g.clip_region_reject:.0%})"))
+    if top is not None and top >= g.sky_blown:
+        out.append(GateFailure("sky_blown", f"sky blown out ({top:.0%} of the top third clipped, >= {g.sky_blown:.0%})"))
+    if mean is not None and spread is not None and mean >= g.washed_mean and spread <= g.washed_spread:
+        out.append(GateFailure("washed_out", f"washed out (mean level {mean:.2f} >= {g.washed_mean:g}, tonal spread {spread:.2f} <= {g.washed_spread:g})"))
+    return out
+
+
+def clip_penalty(values: dict[str, float], settings: "CullSettings") -> float:
+    """Score penalty for a mid-sized clipped region: 0 below clip_region_ignore, rising to clip_penalty at clip_region_reject."""
+    g = settings.gates
+    region = values.get("clip_region")
+    if region is None or region < g.clip_region_ignore or region >= g.clip_region_reject:
+        return 0.0  # small: free; large: the clip_region gate decides, not a penalty
+    span = g.clip_region_reject - g.clip_region_ignore
+    return round(g.clip_penalty * min(1.0, (region - g.clip_region_ignore) / span), 4)
+
+
+def apply_gates(
+    shoot: Shoot, routing: Routing, settings: "CullSettings", scores: dict[str, dict[str, float]] | None = None
+) -> GateResults:
     g = settings.gates
     out = GateResults()
     candidates: list[str] = []
@@ -63,11 +94,7 @@ def apply_gates(shoot: Shoot, routing: Routing, settings: "CullSettings") -> Gat
             if ex.mean < g.black_mean:
                 fails.append(GateFailure(BLACK, f"black frame (mean level {ex.mean:.3f} < {g.black_mean})"))
             else:
-                if ex.highlights_clipped > g.highlights_clipped:
-                    fails.append(GateFailure(
-                        "highlights",
-                        f"unusable clipping ({ex.highlights_clipped:.0%} of pixels clipped > {g.highlights_clipped:.0%})",
-                    ))
+                fails.extend(highlight_failures((scores or {}).get(cid, {}), settings))
                 if ex.shadows_crushed > g.shadows_crushed:
                     fails.append(GateFailure(
                         "shadows",
