@@ -39,10 +39,11 @@ class Scorer(Protocol):
 
 
 def default_scorers() -> list[Scorer]:
+    from aiculler.scorers.clipping import ClippingScorer
     from aiculler.scorers.exposure import ExposureScorer
     from aiculler.scorers.sharpness import SharpnessScorer
 
-    return [ExposureScorer(), SharpnessScorer()]
+    return [ExposureScorer(), SharpnessScorer(), ClippingScorer()]
 
 
 def score_captures(

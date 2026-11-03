@@ -12,6 +12,7 @@ dependencies = [
   "numpy>=1.24",
   "Pillow>=10.0",
   "scikit-learn>=1.3",
+  "scipy>=1.6",
   "onnxruntime>=1.16",
   "tokenizers>=0.15",
   "bracketeering[pixels] @ git+https://github.com/tylermcm/bracketeering@ccr-fd1f1f35-hi49ff",
