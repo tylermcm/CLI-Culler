@@ -64,6 +64,9 @@ Each has a regression test or a measurement to re-check against.
 
 - **What:** it scores night scenes, mist, shallow depth of field and water glare low however sharp the frame is
   (Alaska's bear close-ups at 0.145–0.19, under China's lowest ImageTriage keep, 0.228).
-- **Options after the baseline:** floor only when MANIQA is low *and* the frame is soft (as the blur gate already
-  pairs MANIQA with sharpness), so sharp frames MANIQA dislikes go to review at most; or a floor relative to the
-  shoot's own MANIQA distribution. `sample.json` keeps the sharpness of every sampled frame for this.
+- **Tested and ruled out:** pairing a low MANIQA score with a soft frame. On the frames MANIQA scores lowest, neither whole-frame sharpness
+  (bears at the 5–6th percentile of their shoot, blurred photos of a screen at 57–62%) nor the sharpest tiles of the frame (bears
+  5–17%, screen photos 63%) separates good from bad. A floor relative to the shoot would not help either: the bears are
+  in the bottom 0–2% of a shoot that is almost all wildlife, so even a per-category percentile ranks them last.
+- **Options after the baseline:** category-relative percentiles (TinyCLIP zero-shot categories, EXIF technique
+  flags), compared against a single global level on the labels; or MANIQA sends frames to review only, never rejects.
