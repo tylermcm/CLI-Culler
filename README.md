@@ -7,13 +7,30 @@ Given a shoot, `cull` returns **keep / reject / review for every file, with a re
 brackets, bursts, focus stacks, timelapses, near-duplicate scenes), then compares frames only within those
 sets. The full design is in bracketeering's `docs/CULLING_ENGINE_SPEC.md`.
 
-## Culling a shoot (milestone 1)
+## Culling a shoot
 
 ```bash
-python -m pip install -e .
-ai-culler --db culler.sqlite cull "/shoots/China 8-26" --out decisions.json
+python -m pip install -e '.[models]'      # or plain -e . to run without models
+ai-culler --db culler.sqlite cull "/shoots/China 8-26" --models ~/src/ImageTriage --out decisions.json [--xmp]
 ai-culler --db culler.sqlite evaluate "/shoots/China 8-26" --truth picks --decisions decisions.json --out report.md
+ai-culler --db culler.sqlite learn "/shoots/Japan 4-24" "/shoots/Alaska" --truth picks --out preference.joblib
 ```
+
+**Models** come from the image-triage app's install, never downloaded here (see `docs/MODELS.md`):
+`--models auto` (the installed `image_triage` package), a path to the app, or `none`. Each model the app has
+installed is used; a missing one is skipped with a warning, and `decisions.json` lists the models actually used
+(`models`) and what was skipped (`warnings`). Without models the engine runs on exposure, sharpness and clipping.
+
+**Stages**, each on fewer frames than the last: ingest (bracketeering) → TinyCLIP embeddings and scene
+refinement (split at cosine < `split_cos`, merge adjacent scenes ≥ `merge_cos` within `merge_window`) → route →
+cheap scores and gates → faces (MediaPipe: blinks, face-crop sharpness; AdaFace identities) → MANIQA on
+*contested* frames only (those in a set with more candidates than it keeps) → severe-blur gate → Q-ReAlign on
+each contested set's technical shortlist only (`appeal_shortlist`) → preference (`preference_model` from
+`learn`) → decide → people coverage (each person keeps a frame) → `decisions.json` (+ XMP). `stats` reports how
+many frames reached each stage; `timings` the seconds per stage.
+
+**XMP** (`--xmp`): keep = 3★, review = yellow label, reject = 1★ + red label. Ratings, labels or ImageTriage
+decisions you set yourself are never overwritten unless `--overwrite-ratings`.
 
 `evaluate --truth` sources (each capture's truth is the union over its files):
 
@@ -60,8 +77,12 @@ write_decisions(result, "decisions.json")
   unit in a scene fails a gate, the least-bad goes to review (never a black frame). `evaluate` lists the frames
   you kept that a gate rejects, and how close your keeps come to each threshold, for tuning.
 - **Review**: groups with confidence below `review_below` or with bracketeering warnings, and unreadable files.
-- **Scores** (milestone 1): exposure quality from bracketeering's preview stats and whole-frame Laplacian
-  sharpness, each normalised within its comparison set (`normalise`), combined with `weights`.
+- **Scores**: Q-ReAlign appeal, MANIQA, face-crop sharpness, preference, whole-frame sharpness and exposure,
+  each normalised within its comparison set (`normalise`) and combined with `weights` (spec defaults: appeal
+  0.4, MANIQA 0.25, face 0.15, preference 0.1). A signal nobody in a set has is left out of that set. Penalties:
+  eyes closed on any prominent face (`blink_penalty`), mid-sized clipped regions (`clip_penalty`).
+- **Severe blur** (needs MANIQA): bottom 2% MANIQA of the shoot *and* face (else frame) sharpness under 0.35×
+  its set's median.
 - Sidecars, copies and exports get their shot's decision (`primary: false`).
 
 Output schema `aiculler-decisions/1`: per file `decision`, `group`, `kind`, `role`, `scene`, `capture`,

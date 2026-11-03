@@ -1,4 +1,15 @@
-# Models: where the app's inference lives (for milestones 2+)
+# Models: where the app's inference lives
+
+**Using them.** `pip install -e '.[models]'` adds the runtime (torch, timm, einops, transformers, mediapipe; the
+app runtime's minimums). Install the model files with the app's Set Up AI, then point the culler at the app:
+`--models /path/to/ImageTriage` (its folder or `image_triage/ai_manifest.py`), or `--models auto` when the
+`image_triage` package is installed in the same environment. Files are found the way the app finds them: the
+bundle's `IMAGE_TRIAGE_*_MODEL_DIR` environment variable if set (e.g. `IMAGE_TRIAGE_MANIQA_MODEL_DIR`,
+`IMAGE_TRIAGE_BLINK_MODEL_DIR`, `IMAGE_TRIAGE_FACES_MODEL_DIR`, `IMAGE_TRIAGE_QREALIGN_MODEL_DIR`,
+`IMAGE_TRIAGE_AICULLER_CLIP_MODEL_DIR`), else `<IMAGE_TRIAGE_AI_ROOT or ~/.local/share/ImageTriage/AI>/models/...`.
+File sizes are checked against the pinned digests on every run.
+
+The ported code lives in `src/aiculler/models/` (`app/` verbatim, `engines.py` adapted to take images).
 
 The engine never downloads or pins models; it loads them through the image-triage app's manifest. The code to
 reuse is the app's ranker subprocess, `image_triage/cascade/rankers/` (it holds torch, transformers and mediapipe
