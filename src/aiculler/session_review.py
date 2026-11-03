@@ -301,7 +301,8 @@ def match_key(row: dict[str, str]) -> str:
         return f"id:{image_id}"
     source_path = (row.get("source_path") or row.get("path") or "").strip()
     if source_path:
-        return f"path:{str(Path(source_path)).replace('/', '\\').lower()}"
+        normalized = str(Path(source_path)).replace("/", "\\").lower()
+        return f"path:{normalized}"
     return f"filename:{(row.get('filename') or '').strip().lower()}"
 
 
