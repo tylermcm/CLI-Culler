@@ -1,5 +1,9 @@
 import sqlite3
 
+import json
+
+import pytest
+
 from aiculler.evaluate import Truth, evaluate, load_truth, match_catalog, parse_xmp, read_lrcat, read_xmp_truth, render_report
 
 XMP_ATTR = (
@@ -74,8 +78,9 @@ def test_lrcat_read_only_and_matched_by_folder_and_name(tmp_path):
     assert truth[shoot[1]].rating == 4 and truth[shoot[2]].rating == 4  # JPEG sidecar shares the rating
     assert truth[shoot[3]].rejected_flag and not truth[shoot[3]].kept(3)
     assert shoot[4] not in truth
-    t, source = load_truth(cat, shoot)
-    assert len(t) == 4 and "read-only" in source
+    decisions = {"files": {p: {"capture": p.rsplit(".", 1)[0], "primary": p.endswith(".NEF")} for p in shoot}}
+    ts = load_truth(cat, decisions)
+    assert len(ts.truth) == 4 and "read-only" in ts.source and ts.mode == "labels"
 
 
 def _file(capture, group, kind, scene, decision, primary=True, score=0.5):
@@ -109,3 +114,137 @@ def test_metrics_and_per_set_agreement():
     assert "| Precision of keep | 25.0% |" in report
     assert "## User kept, engine rejected (1)" in report and "u5.NEF | reject | picked" in report
     assert "| ingest | 1.50 |" in report
+
+
+# --------------------------------------------------------------------------- picks, csv, ImageTriage
+
+
+def _doc(files):
+    return {"files": files, "timings": {}}
+
+
+def test_picks_truth_from_copies_and_exports_in_other_folders():
+    files = {
+        # Burst U1: u2 has a copy in _winners/ -> picked; u1's JPEG sidecar sits in its own folder -> not a pick.
+        "/s/day1/u1.NEF": _file("c1", "U1", "burst", 1, "keep"),
+        "/s/day1/u1.JPG": _file("c1", "U1", "burst", 1, "keep", primary=False),
+        "/s/day1/u2.NEF": _file("c2", "U1", "burst", 1, "reject"),
+        "/s/_winners/u2.NEF": _file("c2", "U1", "burst", 1, "reject", primary=False),
+        "/s/day1/u3.NEF": _file("c3", "U1", "burst", 1, "keep"),
+        # Single with an edited export in Bears/ -> picked and kept.
+        "/s/day1/s1.NEF": _file("c4", "S1", "single", None, "keep"),
+        "/s/Bears/s1-edit.jpg": _file("c4", "S1", "single", None, "keep", primary=False),
+        # An export bracketeering could not merge with its original: left out.
+        "/s/Bears/crop-77.jpg": _file("c5", "S2", "single", None, "keep"),
+    }
+    ts = load_truth("picks", _doc(files))
+    assert ts.mode == "picks" and set(ts.truth) == {"/s/day1/u2.NEF", "/s/day1/s1.NEF"}
+    assert ts.excluded == {"c5": "in pick/export folder Bears/ but not merged with an original"}
+    assert "_winners/ (1)" in ts.notes[0] and "Bears/ (1)" in ts.notes[0]
+
+    ev = evaluate(_doc(files), ts)
+    s = ev.summary
+    assert s["captures"] == 4 and s["excluded"] == 1 and s["user_kept"] == 2
+    assert s["recall"] == 0.5 and s["precision"] is None and s["agreement_decided"] is None
+    assert s["engine_keep_rate"] == 0.75
+    assert s["sets"]["burst"]["hit_rate"] == 0.0 and s["sets"]["burst"]["agree_none"] is None
+    report = render_report(ev)
+    assert "| Precision of keep | not meaningful for picks |" in report
+    assert "## User picked, engine rejected (1)" in report and "picked (copy in _winners/)" in report
+    assert "## Sets where the engine kept none of the picked frames (1)" in report
+    assert "## Left out of the metrics (1)" in report and "crop-77.jpg" in report
+    assert "Engine kept, not picked (not necessarily wrong)" in report
+
+
+def test_csv_truth_from_review_session_rows(tmp_path):
+    files = {
+        "/s/a/DSC_0001.NEF": _file("c1", "S1", "single", 1, "keep"),
+        "/s/a/DSC_0002.NEF": _file("c2", "S2", "single", 1, "reject"),
+        "/s/a/DSC_0003.NEF": _file("c3", "S3", "single", 1, "keep"),
+        "/s/a/DSC_0004.NEF": _file("c4", "S4", "single", 2, "keep"),
+        "/s/b/DSC_0004.NEF": _file("c9", "S9", "single", 3, "keep"),  # same name, other capture
+    }
+    feedback = tmp_path / "feedback.csv"
+    feedback.write_text(
+        "id,filename,source_path,label,reject_tags\n"
+        ",DSC_0001.NEF,,keep,\n"
+        ",DSC_0002.NEF,,r,blownout\n"
+        ",DSC_0003.NEF,/elsewhere/a/DSC_0003.NEF,reject,\n"
+        ",DSC_0004.NEF,,keep,\n"  # ambiguous: two captures share the name
+        ",DSC_0005.NEF,,s,\n"
+    )
+    ts = load_truth("csv", _doc(files), truth_file=feedback)
+    assert ts.unlabelled == "exclude"
+    assert {p: t.state for p, t in ts.truth.items()} == {
+        "/s/a/DSC_0001.NEF": "kept", "/s/a/DSC_0002.NEF": "rejected", "/s/a/DSC_0003.NEF": "rejected",
+    }
+    ev = evaluate(_doc(files), ts)
+    assert ev.summary["captures"] == 3  # unlabelled captures left out
+    assert ev.summary["precision"] == 0.5 and ev.summary["recall"] == 1.0
+    assert load_truth(feedback, _doc(files)).source == "CSV feedback.csv"  # a .csv path works directly
+    with pytest.raises(ValueError):
+        load_truth("csv", _doc(files))  # needs --truth-file
+
+
+def _triage_db(path, rows):
+    con = sqlite3.connect(path)
+    con.executescript(
+        """
+        CREATE TABLE sessions (id TEXT PRIMARY KEY);
+        CREATE TABLE decisions (session_id TEXT NOT NULL, path TEXT NOT NULL, modified_ns INTEGER NOT NULL,
+            file_size INTEGER NOT NULL, winner INTEGER NOT NULL DEFAULT 0, reject INTEGER NOT NULL DEFAULT 0,
+            photoshop INTEGER NOT NULL DEFAULT 0, rating INTEGER NOT NULL DEFAULT 0,
+            tags_json TEXT NOT NULL DEFAULT '[]', review_round TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY(session_id, path));
+        """
+    )
+    for session, p, winner, reject, rating, tags in rows:
+        con.execute("INSERT INTO decisions VALUES (?, ?, 0, 0, ?, ?, 0, ?, ?, '')", (session, p, winner, reject, rating, json.dumps(tags)))
+    con.commit()
+    con.close()
+
+
+def test_triage_truth_from_decision_store_and_sidecars(tmp_path, monkeypatch):
+    shoot = tmp_path / "shoot"
+    shoot.mkdir()
+    names = ["W", "K", "R", "Star", "None", "Side"]
+    files = {str(shoot / f"{n}.NEF"): _file(n, f"S{i}", "single", None, "keep") for i, n in enumerate(names)}
+    data = tmp_path / "share" / "Image Triage" / "Image Triage"
+    data.mkdir(parents=True)
+    _triage_db(data / "decisions.sqlite3", [
+        ("Default", str(shoot / "W.NEF"), 1, 0, 0, []),
+        ("Default", str(shoot / "K.NEF"), 0, 0, 0, ["keep"]),
+        ("Default", str(shoot / "R.NEF"), 0, 1, 0, []),
+        ("Default", str(shoot / "Star.NEF"), 0, 0, 4, []),
+        ("Portraits", str(shoot / "W.NEF"), 0, 1, 0, []),
+    ])
+    # A file the database has no row for, decided in ImageTriage's own sidecar field.
+    (shoot / "Side.xmp").write_text(
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        '<rdf:Description rdf:about="" xmlns:triage="https://image-triage.app/ns/1.0/" triage:ReviewState="rejected"/>'
+        "</rdf:RDF></x:xmpmeta>"
+    )
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "share"))
+    monkeypatch.setattr("sys.platform", "linux")
+    ts = load_truth("triage", _doc(files))
+    state = {n: ts.truth[str(shoot / f"{n}.NEF")] for n in names if str(shoot / f"{n}.NEF") in ts.truth}
+    assert state["W"].note == "ImageTriage Winner" and state["K"].note == "ImageTriage Keep"
+    assert state["R"].rejected_flag and state["Side"].rejected_flag
+    assert state["Star"].kept(3) and "None" not in state
+    assert "session 'Default'" in ts.notes[0] and "Portraits" in ts.notes[0]
+    ev = evaluate(_doc(files), ts)
+    assert ev.summary["captures"] == 5 and ev.summary["user_kept"] == 3  # "None" has no label: left out
+
+    other = load_truth("triage", _doc(files), session="Portraits")
+    assert other.truth[str(shoot / "W.NEF")].rejected_flag
+    with pytest.raises(ValueError):
+        load_truth("triage", _doc(files), session="Nope")
+
+
+def test_xmp_reads_imagetriage_fields():
+    t = parse_xmp(
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+        '<rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:subject><rdf:Bag>'
+        "<rdf:li>keep</rdf:li></rdf:Bag></dc:subject></rdf:Description></rdf:RDF></x:xmpmeta>"
+    )
+    assert t.kept(3) and t.tags == ("keep",)
