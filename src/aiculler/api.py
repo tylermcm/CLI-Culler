@@ -43,13 +43,13 @@ class GateSettings:
     """Thresholds for clear failures only. Everything else is a score."""
 
     black_mean: float = 0.02  # mean preview luma below this: black frame / misfire (always a reject)
-    # Highlights, by connected clipped region (never applied to bracket frames):
+    # Highlights, by connected region of pixels blown to white (never applied to bracket frames). Saturated colour
+    # (one channel clipped) only costs score: China 8-26's _DSC1055, a yellow light ring, has 44% of the frame
+    # saturated but 0.3% blown.
     clip_region_ignore: float = 0.05  # largest clipped region below this fraction of the frame: no penalty
-    # Tuned on China 8-26: the closest final pick (_DSC1055) has a 24% region and 59% of its top third
-    # clipped, so the reject thresholds sit well past it.
-    clip_region_reject: float = 0.35  # ...at or above this: reject; in between, a score penalty
+    clip_region_reject: float = 0.35  # largest blown region at or above this: reject; in between, a score penalty
     clip_penalty: float = 0.15  # penalty (combined-score points) at clip_region_reject, linear from 0 at clip_region_ignore
-    sky_blown: float = 0.75  # clipped fraction of the top third at or above this: reject ("sky blown out")
+    sky_blown: float = 0.75  # blown fraction of the top third at or above this: reject ("sky blown out")
     washed_mean: float = 0.80  # mean luma at or above this...
     washed_spread: float = 0.15  # ...and tonal spread (p95 - p5) at or below this: reject ("washed out")
     shadows_crushed: float = 0.60  # fraction of crushed pixels above this: unusable

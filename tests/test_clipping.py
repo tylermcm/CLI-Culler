@@ -22,13 +22,22 @@ def test_blown_sky_is_one_large_region_across_the_top_third():
     assert abs(s["clip_region"] - 1 / 3) < 0.01 and s["top_clip"] == 1.0
 
 
-def test_any_channel_counts_and_diagonal_pixels_connect():
+def test_diagonal_pixels_connect():
     rgb = _frame()
     for i in range(100):
-        rgb[i, i, 0] = 252  # red only, a diagonal line: 8-connected into one region
+        rgb[i, i] = 252  # a diagonal line, blown to white: 8-connected into one region
     s = clipping_stats(rgb)
     assert abs(s["clip_region"] - 100 / (300 * 400)) < 1e-4  # one region of 100 px (rounded to 4 places)
-    assert s["clip_region"] == s["clip_total"]
+    assert s["clip_region"] == s["clip_total"] == s["sat_region"]
+
+
+def test_saturated_colour_is_not_blown():
+    """China 8-26 _DSC1055: a glowing yellow light ring (R 255, G 243, B 89) is colour, not lost detail."""
+    rgb = _frame()
+    rgb[:150, :, :] = (255, 243, 89)  # half the frame, the whole top third
+    s = clipping_stats(rgb)
+    assert s["clip_region"] == 0.0 and s["top_clip"] == 0.0  # nothing for the gates
+    assert abs(s["sat_region"] - 0.5) < 0.01  # but it is measured, for the penalty
 
 
 def test_washed_out_measures():

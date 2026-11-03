@@ -157,7 +157,7 @@ def test_gate_rejects_clear_failures_only():
     b.single("Fine", scene=3, sharpness=100)
     d, _ = run(b)
     assert d["Black"].decision == "reject" and "black frame" in d["Black"].reasons[0]
-    assert d["Clipped"].decision == "reject" and "one clipped region covers 40% of the frame" in d["Clipped"].reasons[0]
+    assert d["Clipped"].decision == "reject" and "one region blown to white covers 40% of the frame" in d["Clipped"].reasons[0]
     assert d["Clipped"].gates == ["clip_region"]
     assert d["Fine"].decision == "keep"
 
@@ -323,7 +323,7 @@ def test_region_sky_and_washed_out_gates():
     b.single("Fine", scene=1, sharpness=10)
     d, _ = run(b, CullSettings(scene_keep=2))
     assert d["Region"].gates == ["clip_region"]
-    assert d["Sky"].gates == ["sky_blown"] and "sky blown out (75% of the top third clipped" in d["Sky"].reasons[0]
+    assert d["Sky"].gates == ["sky_blown"] and "sky blown out (75% of the top third blown to white" in d["Sky"].reasons[0]
     assert d["Washed"].gates == ["washed_out"] and "washed out" in d["Washed"].reasons[0]
     assert d["Bright"].gates == [] and d["Bright"].decision == "keep"
     assert d["Fine"].decision == "keep"  # the only other frame that passed the gates
@@ -400,3 +400,13 @@ def test_moving_bracket_frames_compete_like_a_burst():
 
     d, _ = run(b, CullSettings(bursts_keep=1, moving_brackets="bracket"))
     assert {d[n].decision for n in ("M1", "M2", "M3")} == {"keep"}  # keep_set, as any bracket
+
+
+def test_saturated_colour_costs_score_but_never_fails_a_gate():
+    """China 8-26 _DSC1055: a yellow light ring, 44% of the frame saturated, almost nothing blown to white."""
+    b = ShootBuilder()
+    b.single("Ring", scene=1, sharpness=100, clip_region=0.005, top_clip=0.006, sat_region=0.44)
+    b.single("Plain", scene=1, sharpness=100, clip_region=0.0, sat_region=0.0)
+    d, _ = run(b)
+    assert d["Ring"].gates == [] and d["Ring"].scores["clip_penalty"] == 0.15  # saturated past 35%: full penalty
+    assert d["Plain"].decision == "keep" and any("one saturated region covers 44%" in r for r in d["Ring"].reasons)

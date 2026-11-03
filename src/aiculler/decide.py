@@ -144,7 +144,9 @@ def penalty_items(shoot: Shoot, scores: dict[str, dict[str, float]], settings: "
         its = []
         pen = clip_penalty(values, settings, ungated=g.kind == "exposure")
         if pen > 0:
-            its.append(("clip_penalty", pen, f"one clipped region covers {values['clip_region']:.0%} of the frame"))
+            region = values.get("sat_region", values.get("clip_region", 0.0))
+            what = "clipped" if values.get("clip_region", 0.0) >= 0.5 * region else "saturated"
+            its.append(("clip_penalty", pen, f"one {what} region covers {region:.0%} of the frame"))
         closed = values.get("eyes_closed")
         if settings.require_eyes_open and closed is not None and closed >= settings.blink_threshold and settings.blink_penalty > 0:
             who = "someone's eyes are closed" if values.get("face_count", 1) > 1 else "eyes closed"

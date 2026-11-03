@@ -3,10 +3,12 @@
 Gates on the preview:
 
 * black frame / misfire: mean luma < ``black_mean`` (always a reject)
-* highlights, by connected clipped region (``scorers.clipping``): one region >= ``clip_region_reject`` of the
-  frame, or >= ``sky_blown`` of the top third clipped ("sky blown out"), or a washed-out frame (mean luma >=
-  ``washed_mean`` and tonal spread <= ``washed_spread``). Smaller regions (``clip_region_ignore`` up to
-  ``clip_region_reject``) cost a score penalty in ``decide``; below ``clip_region_ignore``, nothing.
+* highlights, by connected region of pixels blown to white (``scorers.clipping``): one region >=
+  ``clip_region_reject`` of the frame, or >= ``sky_blown`` of the top third blown ("sky blown out"), or a
+  washed-out frame (mean luma >= ``washed_mean`` and tonal spread <= ``washed_spread``). Saturated colour (one
+  channel clipped: a yellow light ring, a neon sign) never fails a gate. Smaller regions, and saturated ones of
+  any size (``clip_region_ignore`` up to ``clip_region_reject``), cost a score penalty in ``decide``; below
+  ``clip_region_ignore``, nothing.
 * unusable shadows: ``shadows_crushed`` > threshold
 * featureless preview: by default a review flag, not a rejection (a moon in an empty sky is featureless too)
 
@@ -56,26 +58,28 @@ def highlight_failures(values: dict[str, float], settings: "CullSettings") -> li
     region, top = values.get("clip_region"), values.get("top_clip")
     mean, spread = values.get("luma_mean"), values.get("luma_spread")
     if region is not None and region >= g.clip_region_reject:
-        out.append(GateFailure("clip_region", f"one clipped region covers {region:.0%} of the frame (>= {g.clip_region_reject:.0%})"))
+        out.append(GateFailure("clip_region", f"one region blown to white covers {region:.0%} of the frame (>= {g.clip_region_reject:.0%})"))
     if top is not None and top >= g.sky_blown:
-        out.append(GateFailure("sky_blown", f"sky blown out ({top:.0%} of the top third clipped, >= {g.sky_blown:.0%})"))
+        out.append(GateFailure("sky_blown", f"sky blown out ({top:.0%} of the top third blown to white, >= {g.sky_blown:.0%})"))
     if mean is not None and spread is not None and mean >= g.washed_mean and spread <= g.washed_spread:
         out.append(GateFailure("washed_out", f"washed out (mean level {mean:.2f} >= {g.washed_mean:g}, tonal spread {spread:.2f} <= {g.washed_spread:g})"))
     return out
 
 
 def clip_penalty(values: dict[str, float], settings: "CullSettings", *, ungated: bool = False) -> float:
-    """Score penalty for a mid-sized clipped region: 0 below clip_region_ignore, rising to clip_penalty at clip_region_reject.
+    """Score penalty for a clipped region, blown or saturated colour (``sat_region``): 0 below clip_region_ignore,
+    rising to clip_penalty at clip_region_reject.
 
-    ``ungated``: for frames the gates never see (a moving bracket's), a region at or past clip_region_reject costs
-    the full penalty instead of nothing.
+    A frame whose *blown* region reaches clip_region_reject is the gate's to reject, and costs nothing here, unless
+    ``ungated`` (a moving bracket's frames, which the gates never see).
     """
     g = settings.gates
-    region = values.get("clip_region")
+    blown = values.get("clip_region")
+    region = values.get("sat_region", blown)
     if region is None or region < g.clip_region_ignore:
         return 0.0  # small: free
-    if region >= g.clip_region_reject:
-        return g.clip_penalty if ungated else 0.0  # large: the clip_region gate decides, not a penalty
+    if not ungated and blown is not None and blown >= g.clip_region_reject:
+        return 0.0  # the clip_region gate decides, not a penalty
     span = g.clip_region_reject - g.clip_region_ignore
     return round(g.clip_penalty * min(1.0, (region - g.clip_region_ignore) / span), 4)
 

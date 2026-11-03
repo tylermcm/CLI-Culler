@@ -55,7 +55,7 @@ class ShootBuilder:
             if "sharpness" in fr:
                 values["sharpness"] = fr["sharpness"]
             values["exposure"] = fr.get("exposure", 1.0)
-            for key in ("clip_region", "top_clip", "luma_mean", "luma_spread", "maniqa", "appeal", "face_sharpness",
+            for key in ("clip_region", "top_clip", "sat_region", "luma_mean", "luma_spread", "maniqa", "appeal", "face_sharpness",
                         "eyes_closed", "face_count", "preference"):
                 if key in fr:
                     values[key] = fr[key]
