@@ -45,7 +45,7 @@ class GateSettings:
     black_mean: float = 0.02  # mean preview luma below this: black frame / misfire (always a reject)
     # Highlights, by connected region of pixels blown to white (never applied to bracket frames). Saturated colour
     # (one channel clipped) only costs score: China 8-26's _DSC1055, a yellow light ring, has 44% of the frame
-    # saturated but 0.3% blown.
+    # saturated but 0.8% blown.
     clip_region_ignore: float = 0.05  # largest clipped region below this fraction of the frame: no penalty
     clip_region_reject: float = 0.35  # largest blown region at or above this: reject; in between, a score penalty
     clip_penalty: float = 0.15  # penalty (combined-score points) at clip_region_reject, linear from 0 at clip_region_ignore
