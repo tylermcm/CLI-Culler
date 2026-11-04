@@ -306,6 +306,10 @@ def read_labels(path: Path) -> dict[str, str]:
     return out
 
 
+FUSION_NAMES = {"either": "MANIQA or Q-ReAlign quality", "both": "MANIQA and Q-ReAlign quality",
+                "agree": "MANIQA and Q-ReAlign quality, review on disagreement"}
+ARM_NAMES = {"maniqa": "MANIQA", "qra_iqa": "Q-ReAlign quality", "appeal": "Q-ReAlign aesthetics",
+             "either": "either", "both": "both", "agree": "agree (review)"}
 MODE_NOTES = {"raw": "the score", "shoot": "percentile in its own shoot",
               "category": "percentile among its category", "technique": "percentile among its category (+ technique)"}
 
@@ -359,6 +363,32 @@ def _best_pair(a: dict[str, float], b: dict[str, float], labels: dict[str, str],
     return best
 
 
+def _breakdown(outcomes: dict[str, dict[str, dict[str, str]]], rows: dict[str, dict], labels: dict[str, str]) -> dict:
+    """{mode: {dimension: {group: {arm: tallies}}}}: per role, most likely category and technique flag, how many
+    rejects each arm catches and how many keeps it sends to review (it loses none at its fitted levels)."""
+    out: dict = {}
+    for mode, arms in outcomes.items():
+        dims: dict[str, dict[str, dict[str, dict[str, int]]]] = {"role": {}, "category": {}, "technique": {}}
+        for arm, verdicts in arms.items():
+            for i, v in verdicts.items():
+                r = rows.get(i, {})
+                groups = {"role": [r.get("role") or "unknown"], "category": [(r.get("labels") or ["unknown"])[0]],
+                          "technique": r.get("techniques") or ["none"]}
+                for dim, names in groups.items():
+                    for g in names:
+                        t = dims[dim].setdefault(g, {}).setdefault(arm, {"keeps": 0, "rejects": 0, "caught": 0, "keeps_review": 0, "keeps_lost": 0})
+                        lab = labels[i]
+                        if lab == "reject":
+                            t["rejects"] += 1
+                            t["caught"] += v == "reject"
+                        else:
+                            t["keeps"] += 1
+                            t["keeps_review"] += v == "review"
+                            t["keeps_lost"] += v == "reject"
+        out[mode] = dims
+    return out
+
+
 def calibrate(sample: dict, labels: dict[str, str], *, margin: float = 0.02, review_share: float = 0.10,
               library: "LibraryBaseline | None" = None) -> dict:
     """Every signal (MANIQA, Q-ReAlign quality, Q-ReAlign aesthetics) in every mode, and MANIQA + Q-ReAlign quality
@@ -371,7 +401,9 @@ def calibrate(sample: dict, labels: dict[str, str], *, margin: float = 0.02, rev
       summed (the honest estimate; needs labels from several shoots).
 
     Fusion without trained probabilities: ``either`` rejects a frame below either signal's safe level; ``both`` only
-    below both, with the pair of levels chosen so no keep is below both."""
+    below both, with the pair of levels chosen so no keep is below both; ``agree`` rejects a frame below both safe
+    levels and sends one below only one of them to review (the models disagree). ``review`` counts what each arm sends
+    to a person."""
     values = signal_values(sample, library)
     folder = {r["id"]: r["folder"] for r in sample["rows"]}
     rejects_total = sum(1 for i, lab in labels.items() if lab == "reject" and i in values.get("maniqa/raw", {}))
@@ -414,6 +446,14 @@ def calibrate(sample: dict, labels: dict[str, str], *, margin: float = 0.02, rev
             "caught": {"quality_reject": caught(reject_at), "quality_review": caught(review_at)},
             "all_safe": caught(safe)["reject"], "safe95": caught(k95)["reject"], "held_out": held, "sweep": sweep,
         }
+    # Outcomes per arm at its fitted levels (every keep safe): {mode: {arm: {id: "reject" | "review" | "pass"}}}.
+    outcomes: dict[str, dict[str, dict[str, str]]] = {}
+    for name, vals in values.items():
+        metric, mode = name.split("/")
+        if name not in signals:
+            continue
+        safe = _safe_level(vals, labels, [i for i in vals if i in labels])
+        outcomes.setdefault(mode, {})[metric] = {i: ("reject" if vals[i] < safe else "pass") for i in vals if i in labels}
     fusion: dict[str, dict] = {}
     for mode in ("raw", "shoot", "category", "technique"):
         a, b = values.get(f"maniqa/{mode}"), values.get(f"qra_iqa/{mode}")
@@ -423,10 +463,13 @@ def calibrate(sample: dict, labels: dict[str, str], *, margin: float = 0.02, rev
         if not any(labels[i] == "keep" for i in ids):
             continue
         sa, sb = _safe_level(a, labels, ids), _safe_level(b, labels, ids)
-        either = sum(1 for i in ids if labels[i] == "reject" and (a[i] < sa or b[i] < sb))
         ta, tb, both = _best_pair(a, b, labels, ids)
-        held_e = {"keeps_lost": 0, "rejects_caught": 0}
-        held_b = {"keeps_lost": 0, "rejects_caught": 0}
+        out_e = {i: ("reject" if a[i] < sa or b[i] < sb else "pass") for i in ids}
+        out_b = {i: ("reject" if a[i] < ta and b[i] < tb else "pass") for i in ids}
+        # agree: each model at its own safe level; reject when both flag a frame, review when only one does (they disagree)
+        out_a = {i: ("reject" if a[i] < sa and b[i] < sb else "review" if (a[i] < sa) != (b[i] < sb) else "pass") for i in ids}
+        outcomes.setdefault(mode, {}).update({"either": out_e, "both": out_b, "agree": out_a})
+        held = {arm: {"keeps_lost": 0, "rejects_caught": 0, "review_keeps": 0, "review_rejects": 0} for arm in ("either", "both", "agree")}
         for f in sorted({folder[i] for i in ids}):
             train, test = [i for i in ids if folder[i] != f], [i for i in ids if folder[i] == f]
             la, lb = _safe_level(a, labels, train), _safe_level(b, labels, train)
@@ -434,17 +477,30 @@ def calibrate(sample: dict, labels: dict[str, str], *, margin: float = 0.02, rev
                 continue
             pa, pb, _ = _best_pair(a, b, labels, train)
             for i in test:
-                key = "keeps_lost" if labels[i] != "reject" else "rejects_caught"
-                if a[i] < la - margin or b[i] < lb - margin:
-                    held_e[key] += 1
-                if a[i] < pa and b[i] < pb:
-                    held_b[key] += 1
-        fusion[mode] = {"either": {"all_safe": either, "held_out": held_e, "levels": [sa, sb]},
-                        "both": {"all_safe": both, "held_out": held_b, "levels": [ta, tb]}}
+                rej = labels[i] == "reject"
+                verdicts = {"either": "reject" if a[i] < la - margin or b[i] < lb - margin else "pass",
+                            "both": "reject" if a[i] < pa and b[i] < pb else "pass",
+                            "agree": "reject" if a[i] < la - margin and b[i] < lb - margin
+                            else "review" if (a[i] < la - margin) != (b[i] < lb - margin) else "pass"}
+                for arm, v in verdicts.items():
+                    if v == "reject":
+                        held[arm]["rejects_caught" if rej else "keeps_lost"] += 1
+                    elif v == "review":
+                        held[arm]["review_rejects" if rej else "review_keeps"] += 1
+
+        def review(out):
+            return {lab: sum(1 for i, v in out.items() if v == "review" and labels[i] == lab) for lab in LABELS}
+
+        fusion[mode] = {"either": {"all_safe": sum(1 for i, v in out_e.items() if v == "reject" and labels[i] == "reject"),
+                                   "held_out": held["either"], "levels": [sa, sb], "review": review(out_e)},
+                        "both": {"all_safe": both, "held_out": held["both"], "levels": [ta, tb], "review": review(out_b)},
+                        "agree": {"all_safe": sum(1 for i, v in out_a.items() if v == "reject" and labels[i] == "reject"),
+                                  "held_out": held["agree"], "levels": [sa, sb], "review": review(out_a)}}
+    breakdown = _breakdown(outcomes, {r["id"]: r for r in sample["rows"]}, labels)
     if not signals:
         raise ValueError("no frame labelled keep has a score: nothing to calibrate against")
     return {"rejects": rejects_total, "folders": len(set(folder.values())), "rules": {"margin": margin, "review_share": review_share},
-            "signals": signals, "fusion": fusion,
+            "signals": signals, "fusion": fusion, "breakdown": breakdown,
             "unscored": sum(1 for r in sample["rows"] if r["id"] in labels and r["scores"].get("maniqa") is None)}
 
 
@@ -457,19 +513,51 @@ def render_calibration(cal: dict) -> str:
               "level with none of your keeps or borderlines below it (fitted on these same labels: optimistic). **95%**: "
               "allowing 5% of keeps below. **Held out**: each shoot judged with a level fitted on the others "
               "(keeps lost / rejects caught; the honest estimate).", "",
-              "| Signal | Compared as | All keeps safe | 95% | Held out: keeps lost | Held out: rejects caught |",
-              "|---|---|---|---|---|---|"]
+              "**Review** counts frames an arm sends to a person instead of deciding (keeps / rejects): it costs your time "
+              "rather than your photos, so compare it too.", "",
+              "| Signal | Compared as | All keeps safe | 95% | Review (keeps / rejects) | Held out: keeps lost | Held out: rejects caught | Held out: review |",
+              "|---|---|---|---|---|---|---|---|"]
     for name, m in cal["signals"].items():
         metric, mode = name.split("/")
         h = m["held_out"]
         held = (str(h["keeps_lost"] + h["borderline_lost"]), str(h["rejects_caught"])) if h["folds"] > 1 else ("–", "–")
-        lines.append(f"| {METRIC_NAMES[metric]} | {MODE_NOTES[mode]} | {m['all_safe']} | {m['safe95']} | {held[0]} | {held[1]} |")
+        lines.append(f"| {METRIC_NAMES[metric]} | {MODE_NOTES[mode]} | {m['all_safe']} | {m['safe95']} | 0 / 0 | {held[0]} | {held[1]} | – |")
     for mode, f in cal["fusion"].items():
-        for rule, label in (("either", "MANIQA or Q-ReAlign quality"), ("both", "MANIQA and Q-ReAlign quality")):
+        for rule, label in FUSION_NAMES.items():
             x = f[rule]
-            h = x["held_out"]
-            held = (str(h["keeps_lost"]), str(h["rejects_caught"])) if cal["folders"] > 1 else ("–", "–")
-            lines.append(f"| {label} | {MODE_NOTES[mode]} | {x['all_safe']} | – | {held[0]} | {held[1]} |")
+            h, rv = x["held_out"], x["review"]
+            ok = cal["folders"] > 1
+            held = (str(h["keeps_lost"]), str(h["rejects_caught"]), f"{h['review_keeps']} / {h['review_rejects']}") if ok else ("–", "–", "–")
+            lines.append(f"| {label} | {MODE_NOTES[mode]} | {x['all_safe']} | – | {rv['keep'] + rv['borderline']} / {rv['reject']} | "
+                         f"{held[0]} | {held[1]} | {held[2]} |")
+    for mode, dims in cal.get("breakdown", {}).items():
+        arms = list(next(iter(next(iter(dims.values())).values()), {}).keys()) if any(dims.values()) else []
+        if not arms:
+            continue
+        lines += ["", f"## Breakdown, {MODE_NOTES[mode]}", "",
+                  "Rejects caught / rejects in the group, at each arm's fitted levels (no keep lost); "
+                  "for the agree arm, keeps it sends to review in brackets.", ""]
+        for dim in ("role", "category", "technique"):
+            groups = dims.get(dim, {})
+            if not groups:
+                continue
+            names = [ARM_NAMES.get(a, a) for a in arms]
+            lines += [f"**By {dim}**", "", "| " + dim.capitalize() + " | keeps | " + " | ".join(names) + " |",
+                      "|---|---|" + "---|" * len(arms)]
+            for g, by_arm in sorted(groups.items(), key=lambda kv: -max(t["keeps"] + t["rejects"] for t in kv[1].values())):
+                first = next(iter(by_arm.values()))
+                cells = []
+                for a in arms:
+                    t = by_arm.get(a)
+                    if t is None:
+                        cells.append("–")
+                        continue
+                    cell = f"{t['caught']} / {t['rejects']}"
+                    if a == "agree" and t["keeps_review"]:
+                        cell += f" ({t['keeps_review']})"
+                    cells.append(cell)
+                lines.append(f"| {g} | {first['keeps']} | " + " | ".join(cells) + " |")
+            lines.append("")
     for name, m in cal["signals"].items():
         metric, mode = name.split("/")
         d, s, c = m["distribution"], m["suggested"], m["caught"]

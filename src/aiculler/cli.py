@@ -1182,7 +1182,9 @@ def command_calibrate(args) -> int:
         print(f"{name}: all keeps safe catches {m['all_safe']} of {cal['rejects']} rejects; held out: "
               f"{h['keeps_lost'] + h['borderline_lost']} keeps lost, {h['rejects_caught']} rejects caught", file=sys.stderr)
     for mode, f in cal["fusion"].items():
-        print(f"maniqa+qra_iqa/{mode}: either {f['either']['all_safe']}, both {f['both']['all_safe']} rejects with all keeps safe", file=sys.stderr)
+        print(f"maniqa+qra_iqa/{mode}: either {f['either']['all_safe']}, both {f['both']['all_safe']}, agree {f['agree']['all_safe']} "
+              f"rejects with all keeps safe (agree sends {f['agree']['review']['keep']} keeps, {f['agree']['review']['reject']} rejects to review)",
+              file=sys.stderr)
     return 0
 
 

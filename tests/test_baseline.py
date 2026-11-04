@@ -247,3 +247,23 @@ def test_sample_draws_would_be_keeps_and_runners_up_with_roles(tmp_path):
     assert doc["population"] == "keepers" and doc["per_role"] == {"burst_winner": 1, "lone": 1, "runner_up": 1}
     every = make_sample([root], tmp_path / "out2", n=20, seed=1, cache_db=tmp_path / "c.sqlite", population="all")
     assert every["drawn"] == 6 and all(r["role"] is None for r in every["rows"])
+
+
+def test_agree_arm_rejects_on_agreement_and_reviews_disagreement_with_breakdowns():
+    rows = [
+        {"id": "k1", "folder": "a", "scores": {"maniqa": 0.20, "qra_iqa": 0.90}, "role": "lone", "labels": ["night"]},
+        {"id": "k2", "folder": "a", "scores": {"maniqa": 0.90, "qra_iqa": 0.20}, "role": "burst_winner", "labels": ["portrait"]},
+        {"id": "r1", "folder": "a", "scores": {"maniqa": 0.10, "qra_iqa": 0.10}, "role": "lone", "labels": ["night"]},  # both
+        {"id": "r2", "folder": "a", "scores": {"maniqa": 0.10, "qra_iqa": 0.95}, "role": "runner_up", "labels": ["night"]},  # one
+    ]
+    labels = {"k1": "keep", "k2": "keep", "r1": "reject", "r2": "reject"}
+    cal = calibrate({"rows": rows}, labels)
+    agree = cal["fusion"]["raw"]["agree"]
+    assert agree["all_safe"] == 1 and agree["review"] == {"keep": 0, "borderline": 0, "reject": 1}
+    by_role = cal["breakdown"]["raw"]["role"]
+    assert by_role["lone"]["maniqa"] == {"keeps": 1, "rejects": 1, "caught": 1, "keeps_review": 0, "keeps_lost": 0}
+    assert by_role["runner_up"]["agree"]["caught"] == 0 and by_role["runner_up"]["maniqa"]["caught"] == 1
+    from aiculler.baseline import render_calibration
+
+    text = render_calibration(cal)
+    assert "review on disagreement" in text and "**By role**" in text
