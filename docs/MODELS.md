@@ -24,7 +24,7 @@ so the app process never imports them). `image_triage/quality/face.py` is the le
 | `q_realign` | `QREALIGN` (`spec.py:21`) | `QRealignEngine`, `cascade/rankers/worker.py:146`: `transformers.AutoModelForImageTextToText` (fallback `Qwen3_5ForConditionalGeneration`); asks for an aesthetics rating, reads the probabilities of excellent/good/fair/poor/bad and weights them 1.0…0.0; images resized to a 1024 px long edge. Started by `qrealign_ranker` (`client.py:378`), called from `cascade/launch.py:81` | — |
 | `maniqa` | `MANIQA` | `ManiqaEngine`, `worker.py:97`; network in `_maniqa_net.py` | — |
 | `face_landmarker` (blink) | `BLINK` | `BlinkEngine`, `worker.py:192` | `cascade/blink.py` |
-| `face_landmarker` + `adaface` (people) | `faces_identity` | `FacesEngine`, `worker.py:244`: the landmarker finds faces, AdaFace runs in onnxruntime on CPU (`worker.py:274`) | `cascade/faces.py`: five alignment points, similarity transform, 112×112 crop, preprocessing |
+| `face_landmarker` + `adaface` (people) | `faces_identity` | `FacesEngine`, `worker.py:244`: the landmarker finds faces, AdaFace runs in onnxruntime on CPU (`worker.py:274`) | `cascade/faces.py`: five alignment points, similarity transform, 112×112 crop, preprocessing. Which frames: the person pre-filter of `face_index.py` (`plan_face_index`: TinyCLIP person probability ≥ 0.15, human/animal margin > −0.05), ported unchanged to `people.person_filter` |
 
 The four ranker bundles are defined in `cascade/rankers/bundles.py` and added to `ai_manifest.MODEL_BUNDLES` /
 `MODEL_FILE_DIGESTS` at import time by `_register_cascade_bundles()` at the end of `ai_manifest.py`.
@@ -56,3 +56,12 @@ Pins, checked against `bundles.py` (they match `CULLING_ENGINE_SPEC.md` §2):
   float32: 0.45 s per frame for both tasks, identical scores, 2 GB of GPU memory. The app's ranker worker loads the
   model the same way and will be just as slow on such a card. `flash-linear-attention` (optional) supplies
   Qwen3.5's linear-attention kernels; without it transformers uses slower reference code.
+
+## Face search speed
+
+The people search looks at each frame whole and then in 50 overlapping tiles (3×3, 4×4, 5×5 grids), so faces a few
+percent of the frame wide are found: about 0.45 s per frame on one core. Two things keep it affordable, as in the app:
+only frames TinyCLIP's person filter flags get it (the rest of the contested frames get the single whole-frame pass,
+which is the blink check), and frames run on 8 threads, each with its own landmarker (MediaPipe releases the GIL
+while it detects; results are identical to one thread, 6.2× faster on 64 frames). Before the filter was ported every
+readable frame was searched: Alaska (5,846 frames) took 35 minutes to find 100 faces.

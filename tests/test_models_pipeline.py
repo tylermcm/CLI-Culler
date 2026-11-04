@@ -35,11 +35,12 @@ class FakeFaces:
     LONG_EDGE = 1280
 
     def __init__(self, table):
-        self.table, self.seen = table, []
+        self.table, self.seen, self.people = table, [], {}
 
-    def detail(self, image):
+    def detail(self, image, people=None):
         m = read_marker(image)
         self.seen.append(m)
+        self.people[m] = people
         return {"faces": self.table.get(m, []), "width": image.width, "height": image.height}
 
 
@@ -130,7 +131,8 @@ def test_people_coverage_end_to_end(shoot, tmp_path):
     # Bob appears only in DSC_0005, which the burst ranking rejected: it is promoted.
     assert d["DSC_0005.JPG"].decision == "keep" and "only good frame of person #2" in d["DSC_0005.JPG"].reasons[-1]
     assert result.stats["people"] == 2 and result.stats["people_promoted"] == 1
-    assert 200 in faces.seen  # with AdaFace, every capture is searched for people, the lone frame included
+    # Without TinyCLIP there is no person filter: every capture is searched for people, the lone frame included.
+    assert 200 in faces.seen and "people: no TinyCLIP person filter; every frame searched (slow)" in result.warnings
     assert d["DSC_0005.JPG"].people == [2] and d["DSC_0100.JPG"].people == [1]
 
     from aiculler.outputs import load_index, write_index
@@ -389,3 +391,51 @@ def test_floor_needs_its_models(shoot, tmp_path):
     settings = CullSettings(models=["maniqa"], gates=GateSettings(quality_signal="qra_iqa", qra_reject=0.4))
     result = cull(shoot, settings, models=ModelRegistry.fake({"maniqa": FakeManiqa({})}), cache_db=tmp_path / "c.sqlite")
     assert all(f.floor is None for f in result.files.values())
+
+
+class FakeTextClip(FakeClip):
+    """TinyCLIP with a text encoder: the person prompts point one way, the no-person prompts another, animals a third."""
+
+    def encode_text(self, prompt):
+        from aiculler.people import ANIMAL_PROMPTS, HUMAN_PROMPTS, NO_PERSON_PROMPTS, PERSON_PROMPTS
+
+        if prompt in PERSON_PROMPTS or prompt in HUMAN_PROMPTS:
+            return [0.0, 1.0, 0.0]
+        if prompt in ANIMAL_PROMPTS and prompt not in NO_PERSON_PROMPTS:
+            return [0.0, 0.0, 1.0]
+        if prompt in NO_PERSON_PROMPTS:
+            return [1.0, 0.0, 0.0]
+        return [0.577, 0.577, 0.577]
+
+
+def test_person_filter_is_the_apps():
+    from aiculler.people import person_filter
+
+    out = person_filter(FakeTextClip({}), {"person": [0, 1, 0], "scenery": [1, 0, 0], "monkey": [0, 0.6, 0.8],
+                                           "edge": [0.85, 0.53, 0]})
+    assert out["person"]["flagged"] and out["person"]["person_prob"] > 0.99
+    assert not out["scenery"]["flagged"] and out["scenery"]["person_prob"] < 0.01
+    # Person-like but animal-led (human/animal margin 0.6 - 0.8 = -0.2, below -0.05): dropped, as in the app.
+    assert out["monkey"]["person_prob"] > 0.99 and not out["monkey"]["flagged"]
+    # 100 * (0.53 - 0.85) = -32 logits: about 1e-14, well under the 0.15 presence threshold.
+    assert not out["edge"]["flagged"]
+
+
+def test_people_search_runs_only_on_frames_with_people(shoot, tmp_path):
+    person, scenery = [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]
+    clip = FakeTextClip({20: person, 30: scenery, 40: scenery, 50: scenery, 60: scenery, 200: person})
+    faces = FakeFaces({20: [_face(0.1)], 200: [_face(0.1, (0, 1))]})
+    reg = ModelRegistry.fake({"face_landmarker": faces, "adaface": object(), "tinyclip": clip})
+    result = cull(shoot, CullSettings(bursts_keep=1, models=["people"]), models=reg, cache_db=tmp_path / "c.sqlite")
+    # The two person frames get the people search; the other burst frames only the whole-frame blink pass; nothing twice.
+    assert faces.people == {20: True, 200: True, 30: False, 40: False, 50: False, 60: False}
+    assert sorted(faces.seen) == sorted(faces.people)
+    assert result.stats["people_searched"] == 2 and result.stats["people"] == 2
+    assert set(result.models) >= {"people", "faces", "tinyclip"} and "+tiles+" in result.models["people"]
+    assert "+whole+" in result.models["faces"] and result.warnings == []
+
+    # No one in the shoot: the people stage still ran (0 people), and only contested frames are looked at.
+    empty = FakeFaces({})
+    nobody = ModelRegistry.fake({"face_landmarker": empty, "adaface": object(), "tinyclip": FakeTextClip({})})
+    none = cull(shoot, CullSettings(bursts_keep=1, models=["people"]), models=nobody, cache_db=tmp_path / "d.sqlite")
+    assert none.stats["people_searched"] == 0 and none.stats.get("people") == 0 and 200 not in empty.seen

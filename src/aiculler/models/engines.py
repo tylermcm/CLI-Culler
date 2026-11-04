@@ -192,7 +192,10 @@ class FacesEngine:
 
     LONG_EDGE = FACES_LONG_EDGE
 
-    def __init__(self, landmarker_dir: Path, recognizer_dir: Path | None = None) -> None:
+    def __init__(self, landmarker_dir: Path, recognizer_dir: Path | None = None, threads: int | None = None) -> None:
+        import os
+        import threading
+
         import mediapipe as mp
         import numpy as np
         from mediapipe.tasks import python as mp_python
@@ -201,13 +204,20 @@ class FacesEngine:
         self.np, self.mp = np, mp
         self.device = "cpu"
         self.half = False
-        options = vision.FaceLandmarkerOptions(
+        self._options = vision.FaceLandmarkerOptions(
             base_options=mp_python.BaseOptions(model_asset_path=str(Path(landmarker_dir) / LANDMARKER_FILE)),
             running_mode=vision.RunningMode.IMAGE,
             num_faces=FACES_MAX,
             output_face_blendshapes=True,
         )
-        self.landmarker = vision.FaceLandmarker.create_from_options(options)
+        self._vision = vision
+        # MediaPipe releases the GIL while it detects, so frames run on threads, each with its own landmarker (one
+        # instance is not safe to share): about 5.5x on 8 threads (V100 box, 1024 px frames, tiled search).
+        self.threads = max(1, threads if threads else min(8, os.cpu_count() or 1))
+        self._local = threading.local()
+        self._all: list = []
+        self._lock = threading.Lock()
+        self.landmarker = self._landmarker()  # fails here, at load, when the model is unusable
         self.recognizer = None
         if recognizer_dir is not None:
             import onnxruntime
@@ -215,12 +225,25 @@ class FacesEngine:
             self.recognizer = onnxruntime.InferenceSession(str(Path(recognizer_dir) / ADAFACE_FILE), providers=["CPUExecutionProvider"])
             self.input_name = self.recognizer.get_inputs()[0].name
 
-    def close(self) -> None:
-        landmarker, self.landmarker = getattr(self, "landmarker", None), None
-        if landmarker is not None:
-            landmarker.close()
+    def _landmarker(self):
+        mine = getattr(self._local, "landmarker", None)
+        if mine is None:
+            mine = self._vision.FaceLandmarker.create_from_options(self._options)
+            self._local.landmarker = mine
+            with self._lock:
+                self._all.append(mine)
+        return mine
 
-    def detail(self, image) -> dict:
+    def close(self) -> None:
+        with self._lock:
+            landmarkers, self._all = self._all, []
+        for landmarker in landmarkers:
+            landmarker.close()
+        self.landmarker = None
+
+    def detail(self, image, people: bool | None = None) -> dict:
+        """``people`` (default: whenever the recognizer is loaded): the tiled small-face search and AdaFace vectors.
+        Without it, the whole-frame pass only (the app's blink check)."""
         from aiculler.models.app.blink import eyes_closed, face_area
         from aiculler.models.app.faces import PEOPLE_MIN_FACE_AREA, align_crop, five_points, landmark_box, preprocess
 
@@ -229,7 +252,8 @@ class FacesEngine:
         # The tiled search finds faces too small for the whole-frame pass, for the People index (AdaFace). Without
         # the recognizer there is no people coverage, and blinks only count faces >= 1% of the frame, which the
         # whole-frame pass finds: that is the app's blink check (BlinkEngine), at a fraction of the cost.
-        if self.recognizer is not None and min(width, height) >= 480:
+        people = self.recognizer is not None if people is None else (people and self.recognizer is not None)
+        if people and min(width, height) >= 480:
             for size, count in ((0.6, 3), (0.4, 4), (0.27, 5)):
                 part_w, part_h = int(width * size), int(height * size)
                 for row in range(count):
@@ -242,7 +266,7 @@ class FacesEngine:
             part = image if (right - left, bottom - top) == (width, height) else image.crop((left, top, right, bottom))
             part_width, part_height = part.size
             pixels = self.np.ascontiguousarray(self.np.asarray(part))
-            result = self.landmarker.detect(self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=pixels))
+            result = self._landmarker().detect(self.mp.Image(image_format=self.mp.ImageFormat.SRGB, data=pixels))
             for index, landmarks in enumerate(result.face_landmarks or []):
                 points = [(p.x, p.y) for p in landmarks]
                 area = face_area(points) * (part_width * part_height) / (width * height)
@@ -265,7 +289,7 @@ class FacesEngine:
         faces = []
         for area, box, crop, shapes in kept[:FACES_MAX]:
             embedding = []
-            if self.recognizer is not None:
+            if people:
                 vector = self.recognizer.run(None, {self.input_name: preprocess(crop)})[0][0]
                 norm = float(self.np.linalg.norm(vector))
                 vector = vector / norm if norm > 0 else vector

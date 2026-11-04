@@ -36,38 +36,49 @@ class FacesScorer:
     Scores: ``face_count`` (prominent faces), ``eyes_closed`` (most closed of the faces >= 1% of the frame: one
     person blinking in a group shot counts, the app's ``frame_blink_score``), ``face_sharpness`` (largest face),
     ``face_area`` (largest face). Detail: ``faces`` (boxes, areas, eyes, AdaFace vectors for people coverage).
+
+    ``people``: the people search (tiled small-face search plus AdaFace vectors; needs AdaFace), else the whole-frame
+    pass only. Default: the people search whenever AdaFace is available. Frames run on the engine's threads.
     """
 
     name = "faces"
     needs_pixels = True
+    batch_size = 64  # enough frames per batch to keep the engine's threads busy
 
-    def __init__(self, registry):
+    def __init__(self, registry, people: bool | None = None):
         self.registry = registry
-        adaface = registry.revision("adaface") if registry.available("adaface") else "none"
-        search = "tiles" if adaface != "none" else "whole"  # tiled small-face search only for people coverage
+        has_adaface = registry.available("adaface")
+        self.people = has_adaface if people is None else (people and has_adaface)
+        adaface = registry.revision("adaface") if self.people else "none"
+        search = "tiles" if self.people else "whole"  # tiled small-face search only for people coverage
         self.revision = f"landmarker:{registry.revision('face_landmarker')}+adaface:{adaface}+{search}+crop{FACE_CROP}-v1"
 
     def score(self, batch) -> list[dict]:
         engine = self.registry.engine("face_landmarker")
-        out = []
-        for cand in batch:
-            image = cand.model_image(engine.LONG_EDGE)
-            if image is None:
-                out.append({})
-                continue
-            faces = engine.detail(image)["faces"]
-            values: dict = {"face_count": len(faces), "faces": faces}
-            prominent = [f for f in faces if f["area"] >= MIN_FACE_AREA and f.get("eyes_closed") is not None]
-            if prominent:
-                values["eyes_closed"] = max(f["eyes_closed"] for f in prominent)
-            if faces:
-                largest = max(faces, key=lambda f: f["area"])
-                values["face_area"] = largest["area"]
-                sharp = face_sharpness(cand.image, largest["box"])
-                if sharp is not None:
-                    values["face_sharpness"] = sharp
-            out.append(values)
-        return out
+        threads = int(getattr(engine, "threads", 1) or 1)
+        if threads > 1 and len(batch) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=min(threads, len(batch))) as pool:
+                return list(pool.map(lambda cand: self._one(engine, cand), batch))
+        return [self._one(engine, cand) for cand in batch]
+
+    def _one(self, engine, cand) -> dict:
+        image = cand.model_image(engine.LONG_EDGE)
+        if image is None:
+            return {}
+        faces = engine.detail(image, self.people)["faces"]
+        values: dict = {"face_count": len(faces), "faces": faces}
+        prominent = [f for f in faces if f["area"] >= MIN_FACE_AREA and f.get("eyes_closed") is not None]
+        if prominent:
+            values["eyes_closed"] = max(f["eyes_closed"] for f in prominent)
+        if faces:
+            largest = max(faces, key=lambda f: f["area"])
+            values["face_area"] = largest["area"]
+            sharp = face_sharpness(cand.image, largest["box"])
+            if sharp is not None:
+                values["face_sharpness"] = sharp
+        return values
 
 
 class ManiqaScorer:

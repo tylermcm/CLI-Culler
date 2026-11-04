@@ -31,8 +31,9 @@ FLOOR_FEATURE = {"maniqa": "maniqa", "qra_iqa": "appeal"}  # the model feature e
 #   maniqa  MANIQA: technical quality when ranking, and the severe-blur gate (contested frames only)
 #   appeal  Q-ReAlign: aesthetic appeal when ranking (each contested set's shortlist only)
 #   search  TinyCLIP: an image embedding for every readable capture, written to the index for semantic search
-#   people  MediaPipe + AdaFace: every readable capture's faces with identity vectors, clustered into people
-#           and written to the index; also keeps one good frame of each person (keep_people_coverage). Implies faces.
+#   people  MediaPipe + AdaFace: faces with identity vectors in every frame the app's TinyCLIP person filter flags,
+#           clustered into people and written to the index; also keeps one good frame of each person
+#           (keep_people_coverage). Implies faces; uses TinyCLIP for the filter.
 MODEL_FEATURES = ("faces", "maniqa", "appeal", "search", "people")
 FEATURE_MODELS: dict[str, tuple[str, ...]] = {
     "faces": ("face_landmarker",),
@@ -222,7 +223,8 @@ class CullSettings:
         return self.floor_on() and self.gates.quality_mode in ("category", "technique")
 
     def needs_tinyclip(self) -> bool:
-        return "search" in self.features() or bool(self.preference_model) or self.category_floor() or self.refine_scenes
+        return ("search" in self.features() or "people" in self.features() or bool(self.preference_model)
+                or self.category_floor() or self.refine_scenes)
 
     def model_keys(self) -> set[str]:
         """Registry keys these settings may load."""
@@ -501,7 +503,8 @@ def cull(
         try:
             scorer = make(registry)
             with stage(name):
-                run_scorers(store, shoot, sorted(captures), [scorer], previews, cache, progress, batch_size=8, workers=workers)
+                run_scorers(store, shoot, sorted(captures), [scorer], previews, cache, progress,
+                            batch_size=getattr(scorer, "batch_size", 8), workers=workers)
         except Exception as exc:  # noqa: BLE001 - any failure to load or run a model skips that model, never the cull
             warnings.append(f"{name}: not used ({type(exc).__name__}: {str(exc).splitlines()[0] if str(exc) else ''})")
             return False
@@ -519,7 +522,8 @@ def cull(
     cache = ScoreCache(cache_db) if cache_db else ScoreCache(":memory:")
     preference = None
     shortlist: set[str] = set()
-    people_on = False
+    people_on = people_ran = False
+    face_stats: dict[str, int] = {}
     try:
         from aiculler.scorers.models import AppealScorer, FacesScorer, ManiqaScorer, TinyClipScorer
 
@@ -542,6 +546,16 @@ def cull(
             except Exception as exc:  # noqa: BLE001 - no text encoder (tokenizers missing...): embeddings still stand
                 warnings.append(f"categories: not used ({type(exc).__name__}: {exc})")
         embeddings = {cid: d["embedding"] for cid, d in store.details.items() if d.get("embedding")}
+        # The app's person pre-filter on those embeddings: which frames get the (slow) people search.
+        persons: dict[str, dict] = {}
+        if "people" in features and embeddings and registry.available("adaface"):
+            try:
+                from aiculler.people import person_filter
+
+                with stage("people"):
+                    persons = person_filter(registry.engine("tinyclip"), embeddings)
+            except Exception as exc:  # noqa: BLE001 - no text encoder: the search falls back to every frame
+                warnings.append(f"people: no person filter ({type(exc).__name__}: {exc}); every frame searched")
         scene_stats: dict[str, int] = {}
         if settings.refine_scenes and embeddings:
             from aiculler.scenes import refine_scenes
@@ -561,11 +575,25 @@ def cull(
             gates = apply_gates(shoot, routing, settings, store.scores)
         live = contested(routing, gates)
 
-        # 4. Faces: every readable capture for the people index (with AdaFace), else only contested frames (the
-        # only ones a blink or a sharper face can still change).
+        # 4. Faces. The people search (tiled, with AdaFace vectors) on every frame the person filter flags (every
+        # readable frame without the filter), then the whole-frame pass on the other contested frames (the only
+        # ones a blink or a sharper face can still change).
         people_on = "people" in features and not unavailable("people", "adaface")
-        face_frames = readable if people_on else (sorted(live) if "faces" in features else [])
-        run_model("faces", "face_landmarker", FacesScorer, face_frames)
+        whole = sorted(live) if "faces" in features else []
+        if people_on:
+            if persons:
+                people_frames = [c for c in readable if persons.get(c, {}).get("flagged")]
+            else:
+                people_frames = readable
+                if "tinyclip" not in used:
+                    warnings.append("people: no TinyCLIP person filter; every frame searched (slow)")
+            face_stats["people_searched"] = len(people_frames)
+            people_ran = run_model("people", "face_landmarker", lambda r: FacesScorer(r, people=True), people_frames)
+            if not people_frames and not unavailable("people", "face_landmarker"):
+                used["people"], people_ran = FacesScorer(registry, people=True).revision, True  # nobody in the shoot
+            searched = set(people_frames)
+            whole = [c for c in whole if c not in searched]
+        run_model("faces", "face_landmarker", lambda r: FacesScorer(r, people=False), whole)
 
         # 5. MANIQA on contested frames (or every competing frame: maniqa_scope all), then the severe-blur gate.
         shoot_floor = settings.floor_on() and settings.gates.quality_mode == "shoot"  # a shoot percentile needs every frame scored
@@ -668,7 +696,7 @@ def cull(
     with stage("decide"):
         people_stats: dict[str, int] = {}
         people = []
-        if people_on and "faces" in used:
+        if people_on and people_ran:
             from aiculler.people import apply_people_coverage, find_people, tag_people
 
             people = find_people(shoot, store.details, settings.face_cluster_threshold)
@@ -694,6 +722,7 @@ def cull(
         "contested_frames": len(live),
         "appeal_frames": len(shortlist),
         **scene_stats,
+        **face_stats,
         **(floor_stats if floor_stats["floor_rounds"] else {}),
         **people_stats,
         **store.stats,

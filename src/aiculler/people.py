@@ -1,7 +1,10 @@
 """People: faces clustered into identities (the ``people`` model feature), and people coverage.
 
-Faces come from the faces scorer (MediaPipe landmarker + AdaFace, as in the app), run on every readable capture
-when ``people`` is on. Identities are clustered the way the app's People index clusters AdaFace vectors
+Faces come from the faces scorer (MediaPipe landmarker + AdaFace, as in the app). Which frames get the people search
+(the tiled small-face search plus identity vectors) is the app's person pre-filter (``face_index.plan_face_index``):
+TinyCLIP's person probability >= ``PERSON_PRESENCE_THRESHOLD`` and not confidently animal-led. The app measured
+recall ~0.93 for people while skipping ~74% of frames; a frame the filter misses keeps its whole-frame faces (blinks)
+when it is contested, but no identity. Identities are clustered the way the app's People index clusters AdaFace vectors
 (``people_search.cluster_face_identities``: in capture order, each face joins the most similar centroid at cosine
 >= ``face_cluster_threshold`` or starts a new person). Every face with an identity vector is clustered, as in the
 app, so the index can find a person however small they are in a frame.
@@ -23,6 +26,74 @@ from aiculler.models.app.blink import MIN_FACE_AREA
 
 if TYPE_CHECKING:
     from aiculler.api import CullSettings, FileDecision
+
+# The app's person pre-filter (image_triage/face_index.py), unchanged: prompts averaged into class centroids, a softmax
+# at CLIP's logit scale over person / no-person, and a human / animal margin that drops animal-led frames.
+PERSON_PRESENCE_THRESHOLD = 0.15
+ANIMAL_REJECTION_MARGIN = -0.05
+PERSON_PROMPTS = (
+    "a photo of a person",
+    "a photo of people",
+    "a photo of a man",
+    "a photo of a woman",
+    "a photo of a child",
+    "a photo of a group of people",
+    "a portrait of a person",
+    "a candid photo of people",
+)
+NO_PERSON_PROMPTS = (
+    "a landscape photo with no people",
+    "a photo of scenery",
+    "a photo of food",
+    "a photo of an animal",
+    "a photo of a building",
+    "a close-up photo of an object",
+    "an empty room with no people",
+    "a photo of a plant",
+)
+HUMAN_PROMPTS = (
+    "a photo of a human person",
+    "a photograph of a man",
+    "a photograph of a woman",
+    "a photograph of a child",
+    "a close-up portrait of a human face",
+    "a group of human people",
+)
+ANIMAL_PROMPTS = (
+    "a photo of an animal",
+    "a photo of a monkey",
+    "a photo of an ape",
+    "a close-up portrait of an animal face",
+    "a photo of wildlife",
+    "a photo of a dog or cat",
+)
+
+
+def _unit(v) -> np.ndarray:
+    v = np.asarray(v, dtype=np.float32).reshape(-1)
+    n = float(np.linalg.norm(v))
+    return v / n if n > 0 else v
+
+
+def person_filter(engine, embeddings: dict[str, list[float]]) -> dict[str, dict]:
+    """{capture: {"person_prob", "animal_margin", "flagged"}} for TinyCLIP image embeddings (``engine.encode_text``
+    encodes the prompts)."""
+
+    def proto(prompts):
+        return _unit(np.mean([_unit(engine.encode_text(p)) for p in prompts], axis=0))
+
+    person, noperson, human, animal = (proto(p) for p in (PERSON_PROMPTS, NO_PERSON_PROMPTS, HUMAN_PROMPTS, ANIMAL_PROMPTS))
+    out = {}
+    for cid, emb in embeddings.items():
+        v = _unit(emb)
+        logits = np.array([float(v @ person), float(v @ noperson)], dtype=np.float64) * 100.0
+        logits -= logits.max()
+        e = np.exp(logits)
+        prob = float(e[0] / e.sum())
+        margin = float(v @ human - v @ animal)
+        out[cid] = {"person_prob": round(prob, 4), "animal_margin": round(margin, 4),
+                    "flagged": prob >= PERSON_PRESENCE_THRESHOLD and margin > ANIMAL_REJECTION_MARGIN}
+    return out
 
 
 @dataclass

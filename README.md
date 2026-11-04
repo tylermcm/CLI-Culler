@@ -27,7 +27,7 @@ most of the work. Models are optional extras, each asked for by name with `--wit
 | `maniqa` | MANIQA | technical quality when ranking; the severe-blur gate | contested frames |
 | `appeal` | Q-ReAlign | aesthetic appeal when ranking | each contested set's shortlist |
 | `search` | TinyCLIP | an embedding per capture, written to the index for semantic search | every readable capture |
-| `people` | MediaPipe + AdaFace | faces with identities, clustered into people, written to the index; each person keeps a good frame; implies `faces` | every readable capture |
+| `people` | MediaPipe + AdaFace | faces with identities, clustered into people, written to the index; each person keeps a good frame; implies `faces`, uses TinyCLIP | every frame the app's TinyCLIP person filter flags |
 
 `all` asks for every one. Models come from the image-triage app's install, never downloaded here
 (`--models auto`, the installed `image_triage` package, or `--models PATH` to the app; see `docs/MODELS.md`). A
@@ -66,7 +66,7 @@ capture, for the app's semantic and people search (`aiculler.outputs.load_index`
 
 **Stages**, each on fewer frames than the last: ingest (bracketeering) → [TinyCLIP embeddings; with
 `refine_scenes`, scene refinement: split at cosine < `split_cos`, merge adjacent scenes ≥ `merge_cos` within
-`merge_window`] → route → cheap scores and gates → [faces] → [MANIQA on *contested* frames only (those in a set
+`merge_window`] → route → cheap scores and gates → [people search on the frames TinyCLIP's person filter flags: tiled face search + AdaFace; faces: the whole-frame pass on the other contested frames] → [MANIQA on *contested* frames only (those in a set
 with more candidates than it keeps) → severe-blur gate] → [Q-ReAlign on each contested set's technical shortlist
 (`appeal_shortlist`)] → [preference (`preference_model` from `learn`)] → decide → [people: clustering, coverage]
 → `decisions.json` (+ index, XMP). Bracketed stages run only when asked for. `stats` reports how many frames
