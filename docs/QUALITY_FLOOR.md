@@ -6,10 +6,14 @@ them before letting it reject anything.
 
 ```bash
 cd ~/Documents/cli-culler
-M=/path/to/ImageTriage            # or omit --models when image_triage is installed
+M=~/Documents/ImageTriage         # the app checkout: its manifest says where the models are
 DB="--db culler.sqlite"
-SHOOTS=("/shoots/A" "/shoots/B" ...)   # 5-10 shoots, as varied as your work
+SHOOTS=("$HOME/ColossalBoi/Photography/China 8-26" "$HOME/ColossalBoi/Photography/Japan 4-24" ...)  # 5-10 shoots, varied
 ```
+
+All five models (MANIQA, Q-ReAlign Mini, TinyCLIP, the face landmarker, AdaFace) are installed in the app's own model
+folders (`~/.local/share/ImageTriage/AI/models/...`) at their pinned revisions, so no `IMAGE_TRIAGE_*_MODEL_DIR`
+variables are needed. Scores are cached in `culler.sqlite`: the four review shoots are already scored.
 
 ## 1. A library baseline (no labels)
 
