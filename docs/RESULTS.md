@@ -127,3 +127,23 @@ the floor can judge (Alaska's picks are almost all bracket frames, which it neve
 one shoot: a difference of a few frames is noise. And ImageTriage's rejects are mostly frames that lost to a better
 neighbour, not junk: no floor should catch them, which is why every mode catches few. The labelled baseline
 (keep / borderline / reject judged frame by frame, spread across categories) is the real test.
+
+## MANIQA vs Q-ReAlign quality (Q-ReAlign Mini on every competing frame)
+
+Library baseline rebuilt with `--qrealign` (2,066 frames, 36 min on the V100 including a MANIQA re-score).
+
+**On existing culls** (China's ImageTriage decisions and picks; 31 keeps, 215 rejects), rejects caught with every
+keep safe: MANIQA 16 (25 as a category + technique percentile), Q-ReAlign quality 5, Q-ReAlign aesthetics 21,
+either 17, both 16, agree 4 (+13 to review, no keep among them). But this does not measure junk detection: the
+rejects below the lowest keep are mostly good photos of the dog the user rejected for a near-identical frame. The
+one real junk frame among them (`_DSC0634`, dark and blurred) gets Q-ReAlign's lowest score (0.33). Both models put
+the same two kept frames (`_DSC0633`, `_DSC0632`) lowest, and those pin every level. Q-ReAlign quality bunches near
+the top of its scale (keeps median 0.98, rejects 0.94).
+
+**On China's would-be keeps** (a real cull with `quality_signal: agree`, `quality_reject` 0.208, `qra_reject` 0.58,
+levels fitted on China, so a check that everything works, not an estimate): no keep lost; 4 frames below both levels went to review as their
+moment's best, 13 where the models disagree went to review. By eye: the frames only Q-ReAlign flagged are mostly
+junk (two accidental motion streaks MANIQA scores 0.28, an out-of-focus shot of the ground, a blurred blob); the
+frames only MANIQA flagged are mostly good (a smiling portrait Q-ReAlign rates 0.84, the Giant Buddha, a portrait
+in a park at 0.91, a street scene). On lone frames Q-ReAlign quality looks like the better junk detector; the
+labelled baseline (judged frame by frame, would-be keeps) is what should decide it.

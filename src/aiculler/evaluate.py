@@ -128,7 +128,7 @@ def evaluate(
     summary = _summary(scored, sets, truth.mode)
     summary["excluded"] = len(rows) - len(scored)
     summary["gates_vs_kept"] = gate_margins(scored, decisions.get("settings", {}).get("gates", {}))
-    summary["floor"] = floor_vs_truth(scored, decisions.get("settings", {}), truth.mode)
+    summary["floor"] = floor_vs_truth(scored, decisions.get("settings", {}), truth.mode, every=rows)
     return Evaluation(
         rows, sets, keep_min_rating, truth.source, truth.mode, truth.unlabelled, list(truth.notes),
         dict(decisions.get("timings", {})), matched, summary,
@@ -216,9 +216,10 @@ GATE_METRICS = [
 ]
 
 
-def floor_vs_truth(rows: list[CaptureRow], settings: dict, mode: str) -> dict:
+def floor_vs_truth(rows: list[CaptureRow], settings: dict, mode: str, every: list[CaptureRow] | None = None) -> dict:
     """What the quality floor did to your keeps (lost: rejected; reviewed: sent to review) and, when the truth has
-    real rejects (not picks), how many of them it caught. Empty when the floor was off."""
+    real rejects (not picks), how many of them it caught. ``acted`` counts the whole shoot (``every``), labelled or
+    not. Empty when the floor was off."""
     g = settings.get("gates") or {}
     on = any(float(g.get(k) or 0) > 0 for k in ("quality_reject", "quality_review", "qra_reject", "qra_review"))
     if not on and not any(r.floor for r in rows):
@@ -228,7 +229,7 @@ def floor_vs_truth(rows: list[CaptureRow], settings: dict, mode: str) -> dict:
     out = {
         "signal": g.get("quality_signal", "maniqa"), "mode": g.get("quality_mode", "raw"), "unique": g.get("quality_unique", "review"),
         "levels": {k: g.get(k) for k in ("quality_reject", "quality_review", "qra_reject", "qra_review") if g.get(k)},
-        "acted": {v: sum(1 for r in rows if r.floor == v) for v in ("reject", "review", "review_unique")},
+        "acted": {v: sum(1 for r in (every or rows) if r.floor == v) for v in ("reject", "review", "review_unique")},
         "keeps": len(kept),
         "keeps_lost": [Path(r.primary).name for r in kept if r.floor == "reject"],
         "keeps_reviewed": [Path(r.primary).name for r in kept if r.floor in ("review", "review_unique")],
@@ -408,8 +409,8 @@ def _floor_section(f: dict, kept_word: str) -> list[str]:
     levels = ", ".join(f"`{k}` {v}" for k, v in f["levels"].items()) or "none set"
     out = ["", f"## Quality floor vs your {kept_word} frames", "",
            f"Signal `{f['signal']}`, mode `{f['mode']}`, a moment's best frame: `{f['unique']}`; levels: {levels}. "
-           f"The floor rejected {f['acted']['reject']}, sent {f['acted']['review']} to review (low quality or the models disagree) "
-           f"and {f['acted']['review_unique']} more as their moment's best frame.", "",
+           f"Across the whole shoot the floor rejected {f['acted']['reject']}, sent {f['acted']['review']} to review (low quality "
+           f"or the models disagree) and {f['acted']['review_unique']} more as their moment's best frame.", "",
            f"- **Your {kept_word} frames the floor rejected: {len(f['keeps_lost'])} of {f['keeps']}**" +
            (f" ({', '.join(f['keeps_lost'][:20])})" if f["keeps_lost"] else " (must be 0 before letting it reject)"),
            f"- Your {kept_word} frames it sent to review: {len(f['keeps_reviewed'])}" +
