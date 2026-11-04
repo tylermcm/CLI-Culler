@@ -286,14 +286,23 @@ def test_quality_floor_rejects_lone_frames_and_moves_contests_on(shoot, tmp_path
                             gates=GateSettings(quality_reject=0.3, quality_review=0.4, blur_ratio=0.0))
     result = cull(shoot, settings, models=reg, cache_db=tmp_path / "c.sqlite")
     d = {p.rsplit("/", 1)[-1]: f for p, f in result.files.items()}
-    # The lone frame is below the floor: rejected, not rescued for review like other gate failures of a lone frame.
-    assert d["DSC_0100.JPG"].decision == "reject" and "below the quality floor (MANIQA 0.200 < 0.3)" in d["DSC_0100.JPG"].reasons[0]
-    assert d["DSC_0100.JPG"].gates == ["quality"] and 200 in maniqa.seen  # scored only because it was about to be kept
+    # The lone frame is below the floor, but it is its moment's only frame: review, not reject (quality_unique).
+    lone = d["DSC_0100.JPG"]
+    assert lone.decision == "review" and lone.floor == "review_unique" and lone.gates == ["quality"]
+    assert any("below the quality floor (MANIQA 0.200 < 0.3)" in r for r in lone.reasons)
+    assert 200 in maniqa.seen  # scored only because it was about to be kept
     # The burst winner fails the floor; the next frame wins, but is in the review band.
     assert d["DSC_0005.JPG"].decision == "reject" and d["DSC_0005.JPG"].gates == ["quality"]
     assert d["DSC_0004.JPG"].decision == "review" and any("low quality (MANIQA 0.350" in r for r in d["DSC_0004.JPG"].reasons)
+    assert d["DSC_0005.JPG"].floor == "reject" and d["DSC_0004.JPG"].floor == "review"
     assert {d[f"DSC_000{i}.JPG"].decision for i in (1, 2, 3)} == {"reject"}
     assert result.stats["quality_rejected"] == 2 and result.stats["quality_review"] == 1
+
+    # quality_unique: reject: the lone frame is rejected outright.
+    strict = CullSettings(bursts_keep=1, models=["maniqa"], weights={"sharpness": 1.0},
+                          gates=GateSettings(quality_reject=0.3, quality_review=0.4, blur_ratio=0.0, quality_unique="reject"))
+    d2 = {p.rsplit("/", 1)[-1]: f for p, f in cull(shoot, strict, models=reg, cache_db=tmp_path / "c.sqlite").files.items()}
+    assert d2["DSC_0100.JPG"].decision == "reject" and d2["DSC_0100.JPG"].floor == "reject"
 
     # Floor off (the default): MANIQA scores only contested frames, and the lone frame is kept unscored.
     maniqa.seen.clear()
@@ -326,3 +335,57 @@ def test_raw_model_outputs_are_kept(shoot, tmp_path):
     assert f.scores["appeal"] == 0.5 and "maniqa_spread" in f.scores
     assert f.outputs["qra_probs"]["iqa"] == [0.1, 0.6, 0.2, 0.1, 0.0] and len(f.outputs["maniqa_crops"]) == 2
     assert result.models["appeal"].endswith("+iqa+iaa+official-p0-stemids-v1")
+
+
+def test_a_burst_whose_every_frame_fails_keeps_its_best_for_review(shoot, tmp_path):
+    from aiculler.api import GateSettings
+
+    maniqa = FakeManiqa({20: 0.1, 30: 0.1, 40: 0.1, 50: 0.1, 60: 0.12, 200: 0.9})
+    settings = CullSettings(bursts_keep=1, models=["maniqa"], weights={"sharpness": 1.0},
+                            gates=GateSettings(quality_reject=0.3, blur_ratio=0.0))
+    result = cull(shoot, settings, models=ModelRegistry.fake({"maniqa": maniqa}), cache_db=tmp_path / "c.sqlite")
+    burst = [f for p, f in result.files.items() if "DSC_010" not in p]
+    assert sorted(f.decision for f in burst) == ["reject", "reject", "reject", "reject", "review"]
+    assert [f.floor for f in burst if f.decision == "review"] == ["review_unique"]
+
+
+class FullQ:
+    LONG_EDGE = 1024
+
+    def __init__(self, table):
+        self.table, self.seen = table, []
+
+    def assess(self, image, tasks=("iqa", "iaa")):
+        m = read_marker(image)
+        self.seen.append(m)
+        return {"iqa": {"probs": [0.2] * 5, "score": self.table.get(m, 0.8)}, "iaa": {"probs": [0.2] * 5, "score": 0.5}}
+
+
+@pytest.mark.parametrize("signal,expected", [
+    ("maniqa", "review_unique"),  # MANIQA alone: below its floor
+    ("qra_iqa", None),  # Q-ReAlign alone: fine
+    ("either", "review_unique"),  # the stricter verdict
+    ("both", None),  # the milder: Q-ReAlign disagrees
+    ("agree", "review"),  # they disagree: review, not reject
+])
+def test_floor_signals_combine_maniqa_and_qrealign(shoot, tmp_path, signal, expected):
+    from aiculler.api import GateSettings
+
+    maniqa, q = FakeManiqa({200: 0.1}), FullQ({200: 0.9})
+    settings = CullSettings(models=["maniqa", "appeal"], gates=GateSettings(
+        quality_signal=signal, quality_reject=0.3, qra_reject=0.4, blur_ratio=0.0))
+    result = cull(shoot, settings, models=ModelRegistry.fake({"maniqa": maniqa, "q_realign": q}), cache_db=tmp_path / "c.sqlite")
+    lone = next(f for p, f in result.files.items() if "DSC_0100" in p)
+    assert lone.floor == expected
+    if signal != "maniqa":
+        assert 200 in q.seen  # Q-ReAlign scored the lone frame because it was about to be kept
+    if signal == "agree":
+        assert any("models disagree on quality" in r for r in lone.reasons)
+
+
+def test_floor_needs_its_models(shoot, tmp_path):
+    from aiculler.api import GateSettings
+
+    settings = CullSettings(models=["maniqa"], gates=GateSettings(quality_signal="qra_iqa", qra_reject=0.4))
+    result = cull(shoot, settings, models=ModelRegistry.fake({"maniqa": FakeManiqa({})}), cache_db=tmp_path / "c.sqlite")
+    assert all(f.floor is None for f in result.files.values())

@@ -46,25 +46,47 @@ class GateFailure:
 class GateResults:
     failures: dict[str, list[GateFailure]] = field(default_factory=dict)  # capture -> failures (reject)
     flags: dict[str, list[str]] = field(default_factory=dict)  # capture -> review flags (not failures)
+    decisive_gates: tuple[str, ...] = DECISIVE  # gates whose failure no rescue undoes (see apply_gates)
 
     def failed(self, capture: str) -> bool:
         return bool(self.failures.get(capture))
 
     def decisive(self, capture: str) -> bool:
-        """Failed a gate no rescue undoes (black frame, below the quality floor)."""
-        return any(f.gate in DECISIVE for f in self.failures.get(capture) or [])
+        """Failed a gate no rescue undoes (a black frame; below the quality floor with quality_unique: reject)."""
+        return any(f.gate in self.decisive_gates for f in self.failures.get(capture) or [])
 
 
-def quality_check(value: float | None, described: str, settings: "CullSettings") -> tuple[GateFailure | None, str | None]:
-    """The quality floor on a value (MANIQA, or its percentile: ``gates.quality_mode``): (failure, review flag); both
-    None when it passes or is unscored. ``described`` explains the value in the reason."""
-    g = settings.gates
-    if value is None:
-        return None, None
-    if g.quality_reject > 0 and value < g.quality_reject:
-        return GateFailure(QUALITY, f"below the quality floor ({described} < {g.quality_reject:g})"), None
-    if g.quality_review > 0 and value < g.quality_review:
-        return None, f"low quality ({described} < {g.quality_review:g})"
+SEVERITY = {"pass": 0, "review": 1, "reject": 2}
+
+
+def floor_verdict(values: dict[str, tuple[float | None, str]], settings: "CullSettings") -> tuple[GateFailure | None, str | None]:
+    """The quality floor's verdict from each judged signal's (value, description): (failure, review flag), both None
+    when the frame passes. A signal without a value (unscored) passes. ``gates.quality_signal`` combines them."""
+    verdicts: dict[str, tuple[str, str]] = {}
+    for metric, (value, described) in values.items():
+        reject, review = settings.floor_levels(metric)
+        if value is None:
+            verdicts[metric] = ("pass", "")
+        elif reject > 0 and value < reject:
+            verdicts[metric] = ("reject", f"{described} < {reject:g}")
+        elif review > 0 and value < review:
+            verdicts[metric] = ("review", f"{described} < {review:g}")
+        else:
+            verdicts[metric] = ("pass", "")
+    sig = settings.gates.quality_signal
+    levels = [v for v, _ in verdicts.values()]
+    if sig in ("maniqa", "qra_iqa", "either"):
+        outcome = max(levels, key=SEVERITY.get)  # the stricter verdict
+    elif sig == "both":
+        outcome = min(levels, key=SEVERITY.get)  # the milder: both must say so
+    else:  # agree: reject only when both say reject; review when either says anything
+        outcome = "reject" if all(v == "reject" for v in levels) else ("review" if any(v != "pass" for v in levels) else "pass")
+    why = " and ".join(d for v, d in verdicts.values() if v != "pass")
+    if outcome == "reject":
+        return GateFailure(QUALITY, f"below the quality floor ({why})"), None
+    if outcome == "review":
+        disagree = sig == "agree" and any(v == "reject" for v in levels)
+        return None, ("models disagree on quality" if disagree else "low quality") + f" ({why})"
     return None, None
 
 
@@ -105,7 +127,7 @@ def apply_gates(
     shoot: Shoot, routing: Routing, settings: "CullSettings", scores: dict[str, dict[str, float]] | None = None
 ) -> GateResults:
     g = settings.gates
-    out = GateResults()
+    out = GateResults(decisive_gates=(BLACK, QUALITY) if g.quality_unique == "reject" else (BLACK,))
     candidates: list[str] = []
     for b in routing.bursts:
         if b.label == "burst":  # a moving bracket's frames are bracket frames: never gated

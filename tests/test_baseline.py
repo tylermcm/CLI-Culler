@@ -148,7 +148,7 @@ def test_category_floor_end_to_end(tmp_path):
     write_shoot(shoot, [Frame("BEAR", 0.0, 0, marker=200), Frame("HILL", 900.0, 1, marker=210)])
     reg = ModelRegistry.fake({"maniqa": FakeManiqa({200: 0.13, 210: 0.13}), "tinyclip": TextClip({200: 0, 210: 1})})
     settings = CullSettings(models=["maniqa"], gates=GateSettings(quality_mode="category", quality_reject=0.05,
-                                                                  quality_baseline=str(path)))
+                                                                  quality_baseline=str(path), quality_unique="reject"))
     result = cull(shoot, settings, models=reg, cache_db=tmp_path / "c.sqlite")
     d = {p.rsplit("/", 1)[-1]: f for p, f in result.files.items()}
     assert d["BEAR.JPG"].decision == "keep" and d["BEAR.JPG"].categories[0] == "animals"
@@ -198,7 +198,8 @@ def test_shoot_mode_floor_uses_the_shoots_own_percentiles(tmp_path):
     write_shoot(root, frames)
     quality = {10 * (i + 1): 0.30 + i / 100 for i in range(25)}  # S00 lowest ... S24 highest
     maniqa = FakeManiqa(quality)
-    settings = CullSettings(models=["maniqa"], scene_keep=0, gates=GateSettings(quality_mode="shoot", quality_reject=0.10))
+    settings = CullSettings(models=["maniqa"], scene_keep=0, gates=GateSettings(quality_mode="shoot", quality_reject=0.10,
+                                                                                quality_unique="reject"))
     result = cull(root, settings, models=ModelRegistry.fake({"maniqa": maniqa}), cache_db=tmp_path / "c.sqlite")
     d = {p.rsplit("/", 1)[-1][:-4]: f for p, f in result.files.items()}
     rejected = sorted(n for n, f in d.items() if f.decision == "reject")

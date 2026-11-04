@@ -21,6 +21,10 @@
     "shadows_crushed": 0.6,
     "quality_reject": 0.0,
     "quality_review": 0.0,
+    "qra_reject": 0.0,
+    "qra_review": 0.0,
+    "quality_signal": "maniqa",
+    "quality_unique": "review",
     "quality_mode": "raw",
     "quality_baseline": null,
     "featureless": "review"

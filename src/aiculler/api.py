@@ -22,6 +22,9 @@ NORMALISE_MODES = ("relative", "rank", "zscore")
 REVIEW_WARNING_MODES = ("doubt", "all", "none")
 MANIQA_SCOPES = ("keepers", "all")
 QUALITY_MODES = ("raw", "shoot", "category", "technique")
+QUALITY_SIGNALS = ("maniqa", "qra_iqa", "either", "both", "agree")
+QUALITY_UNIQUE = ("review", "reject")
+FLOOR_FEATURE = {"maniqa": "maniqa", "qra_iqa": "appeal"}  # the model feature each floor signal needs
 # Optional models. The cull is complete without any of them: gates reject the junk, and bursts, brackets and
 # near-duplicate scenes are culled on exposure, sharpness and clipping. Each one adds something:
 #   faces   MediaPipe: blinks and face-crop sharpness count when ranking (contested frames only)
@@ -55,12 +58,22 @@ class GateSettings:
     washed_mean: float = 0.80  # mean luma at or above this...
     washed_spread: float = 0.15  # ...and tonal spread (p95 - p5) at or below this: reject ("washed out")
     shadows_crushed: float = 0.60  # fraction of crushed pixels above this: unusable
-    # Quality floor (needs MANIQA, "maniqa" in models): every frame about to be kept is scored. Below quality_reject:
-    # rejected, even a lone frame (its contest, if any, moves to the next-best frame); below quality_review: review
-    # instead of keep. Never bracket frames or frames left out of culling. 0 turns a level off.
-    # PROVISIONAL: set from four shoots; to be replaced by a labelled baseline (ai-culler sample / calibrate).
-    quality_reject: float = 0.0
+    # Quality floor: every frame about to be kept is scored by the floor's signal(s). Below a reject level the frame
+    # fails a gate and its contest moves to the next-best frame (scored in turn); below a review level it goes to
+    # review instead of keep. Never bracket frames or frames left out of culling. 0 turns a level off; all levels 0
+    # (the default) is no floor. Set them from your own labels (ai-culler sample / calibrate).
+    quality_reject: float = 0.0  # MANIQA levels (needs "maniqa" in models)
     quality_review: float = 0.0
+    qra_reject: float = 0.0  # Q-ReAlign image-quality levels (needs "appeal" in models)
+    qra_review: float = 0.0
+    # Which signal decides: "maniqa", "qra_iqa", "either" (the stricter verdict of the two), "both" (the milder: a
+    # frame fails only when both say so) or "agree" (reject only when both say reject; review when they disagree or
+    # either says review).
+    quality_signal: str = "maniqa"
+    # A frame below a reject level that is its moment's best (a lone frame, or the best of a burst or scene whose
+    # every candidate failed): "review" (default) or "reject". Redundant frames below it, with a better alternative
+    # that passes, are rejected either way.
+    quality_unique: str = "review"
     # What the levels compare against: "raw" (the MANIQA score itself), "shoot" (its percentile among this shoot's
     # competing frames, 0-1; MANIQA then scores all of them), "category" (its percentile among frames of the same
     # TinyCLIP category in a library baseline, 0-1) or "technique" (category, and category + EXIF technique cells
@@ -155,8 +168,13 @@ class CullSettings:
         check("review_warnings", self.review_warnings, REVIEW_WARNING_MODES)
         check("maniqa_scope", self.maniqa_scope, MANIQA_SCOPES)
         check("gates.quality_mode", self.gates.quality_mode, QUALITY_MODES)
+        check("gates.quality_signal", self.gates.quality_signal, QUALITY_SIGNALS)
+        check("gates.quality_unique", self.gates.quality_unique, QUALITY_UNIQUE)
         if self.gates.quality_mode != "raw" and max(self.gates.quality_reject, self.gates.quality_review) > 1:
             raise ValueError("gates: in a percentile quality_mode the levels are percentiles, 0..1")
+        if not 0 <= self.gates.qra_reject <= 1 or not 0 <= self.gates.qra_review <= 1 or (
+                self.gates.qra_review and self.gates.qra_reject > self.gates.qra_review):
+            raise ValueError("gates: need 0 <= qra_reject <= qra_review <= 1 (0 = off)")
         for m in self.models:
             check("models", m, MODEL_FEATURES + ("all",))
         g = self.gates
@@ -186,10 +204,22 @@ class CullSettings:
             out.add("faces")
         return out
 
-    def category_floor(self) -> bool:
-        """The quality floor judges MANIQA against category baselines (needs TinyCLIP and MANIQA)."""
+    def floor_signals(self) -> list[str]:
+        """The metrics the quality floor judges ("maniqa", "qra_iqa")."""
+        sig = self.gates.quality_signal
+        return [sig] if sig in ("maniqa", "qra_iqa") else ["maniqa", "qra_iqa"]
+
+    def floor_levels(self, metric: str) -> tuple[float, float]:
         g = self.gates
-        return "maniqa" in self.models and g.quality_mode in ("category", "technique") and (g.quality_reject > 0 or g.quality_review > 0)
+        return (g.quality_reject, g.quality_review) if metric == "maniqa" else (g.qra_reject, g.qra_review)
+
+    def floor_on(self) -> bool:
+        """Any floor level set for the floor's signal(s), and their models asked for."""
+        return any(max(self.floor_levels(m)) > 0 and FLOOR_FEATURE[m] in self.features() for m in self.floor_signals())
+
+    def category_floor(self) -> bool:
+        """The quality floor judges scores against category baselines (needs TinyCLIP)."""
+        return self.floor_on() and self.gates.quality_mode in ("category", "technique")
 
     def needs_tinyclip(self) -> bool:
         return "search" in self.features() or bool(self.preference_model) or self.category_floor() or self.refine_scenes
@@ -236,6 +266,9 @@ class FileDecision:
     people: list[int] = field(default_factory=list)  # person numbers in this capture (the "people" feature)
     categories: list[str] = field(default_factory=list)  # what it shows (TinyCLIP, when it ran), most likely first
     techniques: list[str] = field(default_factory=list)  # EXIF technique flags (high_iso, long_lens, ...)
+    # What the quality floor did: "reject", "review" (low quality, or the models disagree), "review_unique" (below the
+    # floor but its moment's best frame: quality_unique review); None when the floor did not act on it.
+    floor: str | None = None
     # Raw model outputs kept for reproduction and later fusion: MANIQA per-crop scores and boxes, Q-ReAlign's five
     # level probabilities per task (see scorers.models).
     outputs: dict = field(default_factory=dict)
@@ -280,29 +313,33 @@ def floor_applies(shoot, routing, capture: str) -> bool:
     return capture not in routing.passthrough and shoot.group_of(capture).kind != "exposure"
 
 
-def make_floor_value(settings: CullSettings, shoot, routing, candidates, store, catinfo, used, warnings):
-    """capture -> (value the floor levels compare, its description), or None (floor off, with a warning)."""
+METRIC_LABELS = {"maniqa": "MANIQA", "qra_iqa": "Q-ReAlign quality"}
+
+
+def make_floor_value(settings: CullSettings, shoot, routing, candidates, store, catinfo, used, warnings, metric: str = "maniqa"):
+    """capture -> (value the floor levels compare, its description) for one signal, or None (floor off, with a warning)."""
     from bisect import bisect_left
 
     mode = settings.gates.quality_mode
+    label = METRIC_LABELS[metric]
 
-    def maniqa(cid):
-        return store.scores.get(cid, {}).get("maniqa")
+    def score(cid):
+        return store.scores.get(cid, {}).get(metric)
 
     if mode == "raw":
-        return lambda cid: (maniqa(cid), "" if maniqa(cid) is None else f"MANIQA {maniqa(cid):.3f}")
+        return lambda cid: (score(cid), "" if score(cid) is None else f"{label} {score(cid):.3f}")
     if mode == "shoot":
-        ref = sorted(v for c in candidates if floor_applies(shoot, routing, c) and (v := maniqa(c)) is not None)
+        ref = sorted(v for c in candidates if floor_applies(shoot, routing, c) and (v := score(c)) is not None)
         if len(ref) < 20:
-            warnings.append(f"quality floor: not used (shoot mode needs MANIQA on at least 20 frames; {len(ref)} scored)")
+            warnings.append(f"quality floor: not used (shoot mode needs {label} on at least 20 frames; {len(ref)} scored)")
             return None
 
         def by_shoot(cid):
-            m = maniqa(cid)
+            m = score(cid)
             if m is None:
                 return None, ""
             pct = bisect_left(ref, m) / len(ref)
-            return pct, f"MANIQA {m:.3f}, percentile {pct:.2f} of this shoot's {len(ref)} frames"
+            return pct, f"{label} {m:.3f}, percentile {pct:.2f} of this shoot's {len(ref)} frames"
         return by_shoot
     # category / technique
     from aiculler.baseline import LibraryBaseline
@@ -313,9 +350,12 @@ def make_floor_value(settings: CullSettings, shoot, routing, candidates, store, 
         return None
     try:
         lib = LibraryBaseline.load(path)
-        lib.check(used.get("maniqa"), used.get("tinyclip"))
+        lib.check(used.get("maniqa"), used.get("tinyclip"), used.get("appeal") if metric == "qra_iqa" else None)
     except (OSError, ValueError) as exc:
         warnings.append(f"quality floor: not used ({exc})")
+        return None
+    if metric not in lib.metrics:
+        warnings.append(f"quality floor: not used (the library baseline has no {label} scores; build it with --qrealign)")
         return None
     if not catinfo:
         warnings.append(f"quality floor: not used ({mode} mode needs TinyCLIP categories)")
@@ -323,12 +363,12 @@ def make_floor_value(settings: CullSettings, shoot, routing, candidates, store, 
     from aiculler.categories import techniques
 
     def by_category(cid):
-        m = maniqa(cid)
+        m = score(cid)
         if m is None:
             return None, ""
         labels = catinfo.get(cid, {}).get("labels", [])
-        pct, cell = lib.percentile(m, labels, techniques(shoot.captures[cid]) if mode == "technique" else [])
-        return pct, f"MANIQA {m:.3f}, percentile {pct:.2f} of {cell}"
+        pct, cell = lib.percentile(m, labels, techniques(shoot.captures[cid]) if mode == "technique" else [], metric)
+        return pct, f"{label} {m:.3f}, percentile {pct:.2f} of {cell}"
     return by_category
 
 
@@ -382,7 +422,7 @@ def cull(
     """
     from aiculler import __version__
     from aiculler.decide import decide
-    from aiculler.gates import apply_gates, quality_check
+    from aiculler.gates import QUALITY, apply_gates, floor_verdict
     from aiculler.ingest import PreviewCache, ingest
     from aiculler.models.registry import ModelRegistry
     from aiculler.routing import route
@@ -498,7 +538,8 @@ def cull(
         run_model("faces", "face_landmarker", FacesScorer, face_frames)
 
         # 5. MANIQA on contested frames (or every competing frame: maniqa_scope all), then the severe-blur gate.
-        every = settings.maniqa_scope == "all" or settings.gates.quality_mode == "shoot"  # a shoot percentile needs them all
+        shoot_floor = settings.floor_on() and settings.gates.quality_mode == "shoot"  # a shoot percentile needs every frame scored
+        every = settings.maniqa_scope == "all" or (shoot_floor and "maniqa" in settings.floor_signals())
         maniqa_frames = [c for c in candidates if not gates.failed(c)] if every else sorted(live)
         if "maniqa" in features and run_model("maniqa", "maniqa", ManiqaScorer, maniqa_frames):
             with stage("gates"):
@@ -509,6 +550,8 @@ def cull(
         # 6. Appeal: Q-ReAlign only on each contested set's technical shortlist.
         if "appeal" in features and not unavailable("appeal", "q_realign"):
             shortlist = appeal_shortlist(routing, gates, store.scores, settings, live)
+            if shoot_floor and "qra_iqa" in settings.floor_signals():
+                shortlist |= {c for c in candidates if not gates.failed(c)}
             run_model("appeal", "q_realign", AppealScorer, shortlist)
 
         # 7. Preference.
@@ -524,18 +567,32 @@ def cull(
                         for cid, p in zip(ids, preference.score(np.asarray([embeddings[c] for c in ids]))):
                             store.scores.setdefault(cid, {})["preference"] = round(float(p), 4)
                 used["preference"] = f"{preference.embedding_revision}+n{preference.examples}"
-        # 8. Decide, then the quality floor: MANIQA on every frame about to be kept; a frame below the floor fails a
-        # gate and its contest is decided again, until no new keeper needs a score.
-        maniqa_broken = any(w.startswith("maniqa: not used") for w in warnings)
-        floor = ("maniqa" in features and not maniqa_broken and registry.available("maniqa")
-                 and (settings.gates.quality_reject > 0 or settings.gates.quality_review > 0))
+        # 8. Decide, then the quality floor: its signal(s) score every frame about to be kept; a frame below a reject
+        # level fails a gate and its contest is decided again, until no new keeper needs a score.
         floor_stats = {"quality_rejected": 0, "quality_review": 0, "floor_rounds": 0}
+        floor_flagged: set[str] = set()
         with stage("decide"):
             files = decide(shoot, routing, gates, store.scores, settings)
-        floor_value = None
+        signals = settings.floor_signals()
+        scorer_of = {"maniqa": ("maniqa", "maniqa", ManiqaScorer), "qra_iqa": ("appeal", "q_realign", AppealScorer)}
+        floor = any(max(settings.floor_levels(m)) > 0 for m in signals)
         if floor:
-            floor_value = make_floor_value(settings, shoot, routing, candidates, store, catinfo, used, warnings)
-            floor = floor_value is not None
+            missing = [FLOOR_FEATURE[m] for m in signals if FLOOR_FEATURE[m] not in features]
+            broken = [m for m in signals if any(w.startswith(f"{scorer_of[m][0]}: not used") for w in warnings)
+                      or not registry.available(scorer_of[m][1])]
+            if missing:
+                warnings.append(f"quality floor: not used (quality_signal {settings.gates.quality_signal} needs --with {','.join(missing)})")
+                floor = False
+            elif broken:
+                floor = False  # the model's own warning says why
+        value_of = {}
+        if floor:
+            for m in signals:
+                fn = make_floor_value(settings, shoot, routing, candidates, store, catinfo, used, warnings, m)
+                if fn is None:
+                    floor = False
+                    break
+                value_of[m] = fn
         checked: set[str] = set()
         while floor:
             keepers = [d.capture for d in files.values() if d.primary and d.decision == "keep" and d.capture not in checked
@@ -543,26 +600,36 @@ def cull(
             if not keepers:
                 break
             floor_stats["floor_rounds"] += 1
-            todo = [c for c in keepers if "maniqa" not in store.scores.get(c, {})]
-            if todo and not run_model("maniqa", "maniqa", ManiqaScorer, todo):
-                floor = False  # MANIQA failed: no floor; the decisions so far stand
+            for m in signals:
+                name, key, make = scorer_of[m]
+                todo = [c for c in keepers if m not in store.scores.get(c, {})]
+                if todo and not run_model(name, key, make, todo):
+                    floor = False  # a model failed: no floor; the decisions so far stand
+            if not floor:
                 break
             changed = False
             for cid in keepers:
                 checked.add(cid)
-                failure, flag = quality_check(*floor_value(cid), settings)
+                failure, flag = floor_verdict({m: value_of[m](cid) for m in signals}, settings)
                 if failure is not None:
                     gates.failures.setdefault(cid, []).append(failure)
                     floor_stats["quality_rejected"] += 1
                     changed = True
                 elif flag is not None:
                     gates.flags.setdefault(cid, []).append(flag)
+                    floor_flagged.add(cid)
                     floor_stats["quality_review"] += 1
                     changed = True
             if not changed:
                 break
             with stage("decide"):
                 files = decide(shoot, routing, gates, store.scores, settings)
+        if floor_stats["floor_rounds"]:
+            for d in files.values():
+                if QUALITY in d.gates:
+                    d.floor = "reject" if d.decision == "reject" else "review_unique"
+                elif d.capture in floor_flagged and d.decision == "review":
+                    d.floor = "review"
     finally:
         cache.close()
         registry.close()
@@ -597,7 +664,7 @@ def cull(
         "contested_frames": len(live),
         "appeal_frames": len(shortlist),
         **scene_stats,
-        **({k: v for k, v in floor_stats.items()} if floor else {}),
+        **(floor_stats if floor_stats["floor_rounds"] else {}),
         **people_stats,
         **store.stats,
     }
