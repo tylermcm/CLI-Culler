@@ -1093,6 +1093,8 @@ def command_evaluate(args) -> int:
         f"recall {s['recall']}, precision {precision}, keep rate {s['engine_keep_rate']}, review rate {s['review_rate']}, "
         f"burst hit rate {s['sets']['burst']['hit_rate']}, scene hit rate {s['sets']['scene']['hit_rate']}"
         + f", {kept_gated} {'picked' if s['mode'] == 'picks' else 'kept'} frame(s) rejected by a gate"
+        + (f"; floor: {len(s['floor']['keeps_lost'])} of your keeps rejected, {len(s['floor']['keeps_reviewed'])} sent to review, "
+           f"{s['floor']['others_rejected']} others rejected" if s.get("floor") else "")
         + (f" -> {args.out}" if args.out else ""),
         file=sys.stderr,
     )

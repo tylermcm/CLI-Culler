@@ -46,6 +46,7 @@ class CaptureRow:
     excluded: str | None = None  # why it is left out of the metrics
     gates: list[str] = field(default_factory=list)  # gates the capture failed (decisions.json)
     scores: dict[str, float] = field(default_factory=dict)
+    floor: str | None = None  # what the quality floor did (decisions.json "floor")
 
 
 @dataclass
@@ -95,6 +96,7 @@ def evaluate(
         if d["primary"]:
             row.primary, row.decision, row.score, row.reasons = path, d["decision"], d["score"], d["reasons"]
             row.gates, row.scores = list(d.get("gates") or []), dict(d.get("scores") or {})
+            row.floor = d.get("floor")
     matched = 0
     for row in caps.values():
         ts = [truth.truth[f] for f in row.files if f in truth.truth]
@@ -126,6 +128,7 @@ def evaluate(
     summary = _summary(scored, sets, truth.mode)
     summary["excluded"] = len(rows) - len(scored)
     summary["gates_vs_kept"] = gate_margins(scored, decisions.get("settings", {}).get("gates", {}))
+    summary["floor"] = floor_vs_truth(scored, decisions.get("settings", {}), truth.mode)
     return Evaluation(
         rows, sets, keep_min_rating, truth.source, truth.mode, truth.unlabelled, list(truth.notes),
         dict(decisions.get("timings", {})), matched, summary,
@@ -211,6 +214,30 @@ GATE_METRICS = [
     ("shadows", "shadows_crushed", "shadows_crushed", "max"),
     ("black", "preview_mean", "black_mean", "min"),
 ]
+
+
+def floor_vs_truth(rows: list[CaptureRow], settings: dict, mode: str) -> dict:
+    """What the quality floor did to your keeps (lost: rejected; reviewed: sent to review) and, when the truth has
+    real rejects (not picks), how many of them it caught. Empty when the floor was off."""
+    g = settings.get("gates") or {}
+    on = any(float(g.get(k) or 0) > 0 for k in ("quality_reject", "quality_review", "qra_reject", "qra_review"))
+    if not on and not any(r.floor for r in rows):
+        return {}
+    kept = [r for r in rows if r.kept]
+    others = [r for r in rows if not r.kept]
+    out = {
+        "signal": g.get("quality_signal", "maniqa"), "mode": g.get("quality_mode", "raw"), "unique": g.get("quality_unique", "review"),
+        "levels": {k: g.get(k) for k in ("quality_reject", "quality_review", "qra_reject", "qra_review") if g.get(k)},
+        "acted": {v: sum(1 for r in rows if r.floor == v) for v in ("reject", "review", "review_unique")},
+        "keeps": len(kept),
+        "keeps_lost": [Path(r.primary).name for r in kept if r.floor == "reject"],
+        "keeps_reviewed": [Path(r.primary).name for r in kept if r.floor in ("review", "review_unique")],
+        "others": len(others),
+        "others_rejected": sum(1 for r in others if r.floor == "reject"),
+        "others_reviewed": sum(1 for r in others if r.floor in ("review", "review_unique")),
+        "real_rejects": mode != "picks",
+    }
+    return out
 
 
 def gate_margins(rows: list[CaptureRow], gates: dict) -> dict:
@@ -320,6 +347,7 @@ def render_report(ev: Evaluation, *, shoot: str = "", worst: int = 25) -> str:
             f"| {kind} | {k['captures']} | {k['user_kept']} | {k['engine_kept']} | {_pct(k['precision'], picks)} | {_pct(k['recall'])} | {k['review']} |"
         )
     lines += _gate_section(s.get("gates_vs_kept") or {}, kept_word)
+    lines += _floor_section(s.get("floor") or {}, kept_word)
     if ev.timings:
         lines += ["", "## Runtime per stage", "", "| Stage | Seconds |", "|---|---|"]
         lines += [f"| {k} | {v:.2f} |" for k, v in ev.timings.items()]
@@ -371,6 +399,23 @@ def _gate_section(g: dict, kept_word: str) -> list[str]:
         out += ["", f"Closest {kept_word} frame to each threshold:", "", "| Gate | Setting | Threshold | Closest frame | Value | Passes |", "|---|---|---|---|---|---|"]
         for gate, m in metrics.items():
             out.append(f"| {gate} | `{m['setting']}` | {_fmt(m['threshold'])} | {m['file']} | {_fmt(m['worst'])} | {'yes' if m['passes'] else '**no**'} |")
+    return out
+
+
+def _floor_section(f: dict, kept_word: str) -> list[str]:
+    if not f:
+        return []
+    levels = ", ".join(f"`{k}` {v}" for k, v in f["levels"].items()) or "none set"
+    out = ["", f"## Quality floor vs your {kept_word} frames", "",
+           f"Signal `{f['signal']}`, mode `{f['mode']}`, a moment's best frame: `{f['unique']}`; levels: {levels}. "
+           f"The floor rejected {f['acted']['reject']}, sent {f['acted']['review']} to review (low quality or the models disagree) "
+           f"and {f['acted']['review_unique']} more as their moment's best frame.", "",
+           f"- **Your {kept_word} frames the floor rejected: {len(f['keeps_lost'])} of {f['keeps']}**" +
+           (f" ({', '.join(f['keeps_lost'][:20])})" if f["keeps_lost"] else " (must be 0 before letting it reject)"),
+           f"- Your {kept_word} frames it sent to review: {len(f['keeps_reviewed'])}" +
+           (f" ({', '.join(f['keeps_reviewed'][:20])})" if f["keeps_reviewed"] else "")]
+    other = "frames you rejected" if f["real_rejects"] else "frames you did not pick (not necessarily bad)"
+    out.append(f"- Of the {f['others']} {other}: {f['others_rejected']} rejected by the floor, {f['others_reviewed']} sent to review")
     return out
 
 

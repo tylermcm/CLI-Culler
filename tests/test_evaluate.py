@@ -299,3 +299,26 @@ def test_picks_ignore_card_folders_and_bulk_copies():
     assert ts.excluded == {"x": "in pick/export folder Bears/ but not merged with an original"}  # originals stay in
     only = load_truth("picks", _doc(files), pick_folders=["eagles"])
     assert set(only.truth) == {"/s/Alaska/DSC_0150.NEF"}
+
+
+def test_evaluate_reports_what_the_quality_floor_did_to_your_keeps():
+    from aiculler.evaluate import evaluate, render_report
+    from aiculler.truth import Truth, TruthSet
+
+    def f(cap, decision, floor, gates=()):
+        return {"decision": decision, "group": cap, "kind": "single", "role": "single", "scene": None, "capture": cap,
+                "primary": True, "score": None, "scores": {}, "reasons": ["x"], "gates": list(gates), "floor": floor}
+
+    decisions = {"settings": {"gates": {"quality_reject": 0.2, "quality_signal": "maniqa"}}, "files": {
+        "/s/A.NEF": f("A", "reject", "reject", ["quality"]),  # a keep the floor lost
+        "/s/B.NEF": f("B", "review", "review_unique", ["quality"]),  # a keep it sent to review
+        "/s/C.NEF": f("C", "reject", "reject", ["quality"]),  # a reject it caught
+        "/s/D.NEF": f("D", "keep", None),
+    }}
+    truth = TruthSet({"/s/A.NEF": Truth(label="Accepted", state="kept"), "/s/B.NEF": Truth(label="Accepted", state="kept"),
+                      "/s/C.NEF": Truth(label="Rejected", state="rejected"), "/s/D.NEF": Truth(label="Accepted", state="kept")},
+                     "triage", mode="full")
+    ev = evaluate(decisions, truth)
+    fl = ev.summary["floor"]
+    assert fl["keeps_lost"] == ["A.NEF"] and fl["keeps_reviewed"] == ["B.NEF"] and fl["others_rejected"] == 1
+    assert "Your kept frames the floor rejected: 1 of 3" in render_report(ev)

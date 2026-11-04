@@ -52,6 +52,8 @@ ai-culler --db culler.sqlite sample /shoots/A /shoots/B ... --n 150 --baseline l
 ai-culler calibrate baseline --baseline library.json --out baseline/calibration.md   # modes compared, suggested levels
 ```
 
+Step by step, with how to read the comparison and check the result against your past culls: `docs/QUALITY_FLOOR.md`.
+
 **TinyCLIP runs first** whenever anything needs it (`search`, the category floor, `preference_model`,
 `refine_scenes`): on every readable capture, bracket and burst frames included, before routing and gates. Every
 file then carries its `categories` (portrait, people, landscape, architecture, animals, macro, night, street,
