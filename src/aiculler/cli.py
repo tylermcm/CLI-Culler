@@ -1155,7 +1155,8 @@ def command_sample(args) -> int:
     for w in doc["warnings"]:
         print(f"warning: {w}", file=sys.stderr)
     for folder, k in doc["per_folder"].items():
-        print(f"{folder}: {k} of {doc['candidates_per_folder'][folder]} competing frames")
+        pool = "frames the floor would judge" if doc.get("population") == "keepers" else "competing frames"
+        print(f"{folder}: {k} of {doc['candidates_per_folder'][folder]} {pool}")
     if doc["per_role"]:
         print("by role: " + ", ".join(f"{r} {k}" for r, k in doc["per_role"].items()))
     if doc["per_category"]:
