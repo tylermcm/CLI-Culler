@@ -200,3 +200,31 @@ threshold (0.35).
 Time, Alaska culled from scratch with `--with people` (2,707 captures, new database, previews cached): 4.7 minutes in
 all; faces 55 s of it (people search on 149 frames 22 s, the whole-frame blink pass on 681 other contested frames
 33 s), TinyCLIP 75 s, cheap scores 67 s, ingest 59 s. Before the filter, the face search alone took 35 minutes.
+
+## The labelled baseline (150 frames, 8 shoots)
+
+Library: 3,198 competing frames from 8 shoots (the four review shoots, Portraits, Iceland 10-24, Banff 8-25, Peru '22),
+every category over 50 frames. Sample: 150 would-be keeps and runners-up of the cull in `my_settings.json` (faces,
+MANIQA, Q-ReAlign, scene refinement), 15 per category, labelled frame by frame: 52 keep (10 hero), 25 borderline,
+73 reject.
+
+Best arms (rejects caught of 73 with no keep or borderline below the level; held out = each shoot judged with a
+level fitted on the other seven):
+
+| Signal, compared as | All keeps safe | Held out: keeps lost / rejects caught |
+|---|---|---|
+| Q-ReAlign quality, percentile in its category | 12 | **0 / 12** |
+| Q-ReAlign quality, category + technique | 11 | 0 / 10 |
+| Q-ReAlign aesthetics, category + technique | 11 | 0 / 10 |
+| MANIQA, any mode | 3–5 | 1–2 lost |
+| MANIQA or Q-ReAlign quality, category | 13 | 1 lost / 12 |
+
+MANIQA adds nothing as a floor; combining it with Q-ReAlign catches one more reject and loses a keep held out. The
+floor catches about one reject in six: most labelled rejects are dull or redundant, not broken, which no quality
+floor should catch. With 77 keeps and borderlines and none lost, the false-reject rate is below about 4% (95%).
+
+Level: Q-ReAlign quality below the 12th percentile of its category (`quality_signal: qra_iqa`, `quality_mode:
+category`, 0.12). As a reject level it rejected one ImageTriage keep on China (`_DSC0633`, a dark low-angle shot of
+the dog; `_DSC0632` went to review), the frames both models have always put lowest. As a review level
+(`qra_review: 0.12`, no reject level): 0 keeps rejected on China (ImageTriage and picks) and Alaska (picks); China
+sends 24 frames to review, one of them a keep. Recommended: review only, until it has been checked on more shoots.
