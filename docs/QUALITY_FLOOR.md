@@ -29,10 +29,10 @@ steadier (a category is used once it has 50 frames).
 
 ```bash
 .venv/bin/ai-culler $DB sample "${SHOOTS[@]}" --n 150 --baseline library.json --settings my_settings.json \
-    --out ~/baseline --models $M
+    --qrealign --out ~/baseline --models $M
 ```
 
-The sample is drawn from the frames the floor would actually judge in *your* cull (`--settings`): would-be keeps
+`--qrealign` gives every sampled frame Q-ReAlign scores (cached for frames already in the library). The sample is drawn from the frames the floor would actually judge in *your* cull (`--settings`; `my_settings.json` is faces, MANIQA, Q-ReAlign and scene refinement): would-be keeps
 (lone frames, burst and scene winners) and each set's runner-up, spread across categories. Open
 `~/baseline/label.html` and judge each frame on its own, as if it were the only frame of its moment: 1 keep,
 2 borderline, 3 reject, 4 hero. Scores are hidden. Export `labels.csv` into `~/baseline`.
