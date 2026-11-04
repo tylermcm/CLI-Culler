@@ -34,21 +34,22 @@ most of the work. Models are optional extras, each asked for by name with `--wit
 model you asked for that is missing or fails to load is skipped with a warning; `decisions.json` lists the
 models actually used (`models`) and what was skipped (`warnings`).
 
-**Quality floor** (needs `--with maniqa`; `gates.quality_reject`, `gates.quality_review`): MANIQA scores every
-frame about to be kept, lone frames included. Below `quality_reject` a frame is rejected (a lone frame too) and its
-contest, if any, moves to the next-best frame, which is scored in turn; below `quality_review` it goes to review.
-Bracket frames and frames left out of culling are never floored. `maniqa_scope: all` scores every competing frame.
-MANIQA scores night, mist, glare and shallow depth of field low whatever their quality, so the levels can compare
-the score against similar frames instead (`gates.quality_mode`): `raw` (the score), `shoot` (its percentile in its
-own shoot), `category` (its percentile among frames of its TinyCLIP category in a library baseline) or `technique`
-(category, and category + EXIF technique: high ISO, slow shutter, long lens, wide aperture, flash). Set the mode
-and the levels from your own labels:
+**Quality floor** (`gates.quality_signal`, the levels `qra_reject` / `qra_review` for Q-ReAlign image quality, needs
+`--with appeal`; `quality_reject` / `quality_review` for MANIQA, needs `--with maniqa`): every frame about to be kept
+is scored, lone frames included. Below the reject level a redundant frame is rejected and its contest moves to the
+next-best frame, which is scored in turn; a moment's only or best frame goes to review instead (`quality_unique:
+review`); below the review level a frame goes to review. Bracket frames and frames left out of culling are never
+floored. Scores can be compared raw or against similar frames (`gates.quality_mode`): `raw`, `shoot` (percentile in
+its shoot), `category` (percentile among frames of its TinyCLIP category in a library baseline) or `technique`
+(category + EXIF technique: high ISO, slow shutter, long lens, wide aperture, flash). Calibrated on 150 labelled
+frames (`docs/RESULTS.md`): Q-ReAlign quality by category, review below the 12th percentile; MANIQA did not work
+as a floor. Set it from your own labels:
 
 ```bash
 M=~/src/ImageTriage
-ai-culler --db culler.sqlite baseline /shoots/A /shoots/B ... --out library.json --models $M   # MANIQA + TinyCLIP, no labels
-ai-culler --db culler.sqlite sample /shoots/A /shoots/B ... --n 150 --baseline library.json --out baseline --models $M
-#   open baseline/label.html, mark each frame keep / borderline / reject (keys 1-3), Export labels.csv into baseline/
+ai-culler --db culler.sqlite baseline /shoots/A /shoots/B ... --qrealign --out library.json --models $M   # no labels
+ai-culler --db culler.sqlite sample /shoots/A /shoots/B ... --n 150 --baseline library.json --qrealign --out baseline --models $M
+#   open baseline/label.html, mark each frame keep / borderline / reject / hero (keys 1-4), Export labels.csv into baseline/
 ai-culler calibrate baseline --baseline library.json --out baseline/calibration.md   # modes compared, suggested levels
 ```
 
@@ -132,77 +133,20 @@ Output schema `aiculler-decisions/1`: per file `decision`, `group`, `kind`, `rol
 `primary`, `comparison_set`, `rank_in_set`, `set_size`, `score`, `scores`, `reasons`; plus `summary`,
 `settings`, `timings`.
 
-## Legacy ranking commands
-
-The commands below predate the culling engine (global ranking with CLIP-L/TOPIQ). They still work and will
-be retired or moved to `legacy/` as `cull` covers their use.
-
-## Install
-
-```powershell
-python -m pip install -e .
-```
-
-## Local Assets
-
-Model weights, downloaded RAW samples, SQLite databases, cache folders, logs, and generated ranking CSVs are intentionally not tracked. The CLI defaults expect local models at:
-
-```text
-models/Clip/clip-vit-large-patch14/onnx/vision_model_uint8.onnx
-models/Clip/clip-vit-large-patch14/onnx/text_model_uint8.onnx
-models/Clip/clip-vit-large-patch14/tokenizer.json
-models/TOPIQ/topiq_nr.onnx
-```
-
-## CLI
-
-```powershell
-ai-culler --db .\culler.sqlite ingest C:\photos --cache .\.aiculler_cache --clip .\clip.onnx --topiq .\topiq.onnx
-ai-culler --db .\culler.sqlite sort
-ai-culler --db .\culler.sqlite export --format csv --out .\ranking.csv
-ai-culler --db .\culler.sqlite stage --keep-dir .\kept --reject-dir .\rejected --keep-percent 50
-ai-culler --db .\culler.sqlite score-text --prompt "warm candid moments, sharp eyes" --out .\prompt_ranking.csv
-ai-culler --db .\culler.sqlite learn-feedback --feedback .\feedback.csv --out .\learned_ranking.csv
-ai-culler --db .\culler.sqlite rank --prompt "bright airy street scene" --avoid blownout --out .\ranking.csv
-ai-culler review-session --ranking .\ranking.csv --out .\session_feedback.csv --top 50
-ai-culler --db .\culler.sqlite rank --feedback .\session_feedback.csv --out .\ranking_after_feedback.csv
-ai-culler compare-rankings --before .\ranking.csv --after .\ranking_after_feedback.csv --feedback .\session_feedback.csv --out .\rank_delta.csv
-```
-
-Feedback CSVs can use `id`, `filename`, or `source_path` plus a `label` column:
-
-```csv
-filename,label
-IMG_0001.CR3,keep
-IMG_0002.CR3,reject
-```
-
-CLI runs write structured logs by default under `logs/`. Use `--run-id` to make a log folder easier to find, or `--no-log` for throwaway runs:
-
-```powershell
-ai-culler --run-id portrait_test --db .\culler.sqlite score-profile --profile portrait_bokeh --out .\profile.csv
-```
-
-`review-session` walks a ranking CSV in terminal mode and writes a training-ready feedback CSV. Use `k` for keep, `r` for reject, `s` to skip, and `q` to stop. Rejected images can include semicolon-separated reject tags such as `blownout;motionblur`.
-
-For a lightweight dry run that only scans RAW files and extracts embedded JPEG previews:
-
-```powershell
-ai-culler --db .\culler.sqlite ingest C:\photos --cache .\.aiculler_cache --no-features
-```
-
-## Python API
+## Python API (for ImageTriage)
 
 ```python
-from aiculler import SQLiteFeatureStore, ActiveQuicksortCuller
+from aiculler import CullSettings, ModelRegistry, cull
+from aiculler.outputs import write_decisions, write_index
 
-store = SQLiteFeatureStore("culler.sqlite")
-
-def on_query(left_id, pivot_id, context):
-    return 1  # keep left over pivot
-
-culler = ActiveQuicksortCuller(store, query_callback=on_query)
-ranking = culler.sort()
+settings = CullSettings.from_json("floor_settings.json")          # or CullSettings(models=["people", "search"])
+models = ModelRegistry.from_app_manifest("/path/to/ImageTriage")  # the app's installed, pinned models
+result = cull("/shoots/China 8-26", settings, models=models, cache_db="culler.sqlite",
+              on_progress=lambda stage, done, total: None)
+write_decisions(result, "decisions.json")                         # keep / reject / review + reasons per file
+if result.index:
+    write_index(result, "index.npz")                              # TinyCLIP embeddings, faces, people
 ```
 
-No PySide, PyQt, Tkinter, or GUI event loop is imported anywhere in the engine.
+No GUI toolkit is imported anywhere in the engine. Install: `pip install -e .` (the cull needs no models), plus
+`.[models]` for the model runtime (torch, transformers, mediapipe, timm, einops).

@@ -1,12 +1,8 @@
 # Python build/runtime artifacts
 __pycache__/
 *.py[cod]
-*$py.class
 .pytest_cache/
-.mypy_cache/
 .ruff_cache/
-.coverage
-htmlcov/
 build/
 dist/
 *.egg-info/
@@ -14,40 +10,25 @@ dist/
 # Virtual environments and local secrets
 .venv/
 venv/
-env/
 .env
 .env.*
 
-# Local model weights and downloaded datasets
+# Model weights (they come from the image-triage app's install)
 /models/
 *.onnx
 *.safetensors
 *.pt
 *.pth
 *.ckpt
-benchmark_raw_samples/
-test_raw_samples/
 
-# Engine caches, local DBs, logs, and staged photo output
-.aiculler_cache/
-logs/
-staged/
+# Score caches, preview caches and run outputs
 *.sqlite
 *.sqlite-*
-*.db
-*.db-*
-
-# Generated ranking, benchmark, and review-session outputs
-benchmark_*.csv
-benchmark_*.json
-raw_sample_*.csv
-raw_sample_*.json
-logging_*.csv
-session_review_smoke_*
-*_ranking.csv
-*_full_export.csv
-*_diagnostics.csv
-*_comparison.csv
-*_feedback.csv
-*_timings.csv
-*_rank_delta.csv
+*_previews/
+.aiculler_cache/
+logs/
+*.log
+decisions.json
+index.npz
+report.md
+*.joblib
