@@ -290,6 +290,7 @@ class CullResult:
     # The search and people index (``outputs.write_index``): TinyCLIP embeddings per capture and clustered faces.
     # Empty unless the "search" / "people" model features ran. Not part of decisions.json (it is large).
     index: dict = field(default_factory=dict)
+    shoot: object = field(default=None, repr=False, compare=False)  # the ingested shoot (not serialised)
 
     @property
     def summary(self) -> dict[str, int]:
@@ -314,6 +315,35 @@ def floor_applies(shoot, routing, capture: str) -> bool:
 
 
 METRIC_LABELS = {"maniqa": "MANIQA", "qra_iqa": "Q-ReAlign quality"}
+
+
+FLOOR_ROLES = ("lone", "burst_winner", "burst_keep", "scene_winner", "scene_keep", "runner_up")
+
+
+def floor_population(shoot, files: dict[str, "FileDecision"], settings: CullSettings) -> dict[str, str]:
+    """The frames a quality floor judges in this cull, by role: what it keeps (a lone frame, a burst's or a scene's
+    winner, another survivor) and each set's runner-up (promoted if a winner fails). Approximate for a burst that is
+    itself a scene's runner-up (its frames carry only their burst ranking)."""
+    from aiculler.routing import route
+
+    routing = route(shoot, settings)
+    out: dict[str, str] = {}
+    for d in files.values():
+        if not d.primary or not floor_applies(shoot, routing, d.capture):
+            continue
+        burst = d.kind == "burst" and d.comparison_set is not None and not d.comparison_set.startswith(("scene:", "solo:"))
+        if d.decision == "keep":
+            if d.comparison_set is None:
+                out[d.capture] = "lone"
+            elif burst:
+                out[d.capture] = "burst_winner" if d.rank_in_set == 1 else "burst_keep"
+            else:
+                out[d.capture] = "scene_winner" if d.rank_in_set == 1 else "scene_keep"
+        elif d.decision == "reject" and not d.gates and d.rank_in_set is not None:
+            keep = settings.bursts_keep if burst else settings.scene_keep
+            if keep and d.rank_in_set == keep + 1:
+                out[d.capture] = "runner_up"
+    return out
 
 
 def make_floor_value(settings: CullSettings, shoot, routing, candidates, store, catinfo, used, warnings, metric: str = "maniqa"):
@@ -678,4 +708,5 @@ def cull(
         stats=stats,
         warnings=warnings,
         index=index,
+        shoot=shoot,
     )

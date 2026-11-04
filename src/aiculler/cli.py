@@ -1142,16 +1142,20 @@ def command_sample(args) -> int:
         from aiculler.baseline import LibraryBaseline
 
         library = LibraryBaseline.load(args.baseline)
-    registry = _load_registry(args, {"maniqa"} | ({"q_realign"} if args.qrealign else set()))
+    settings = _load_cull_settings(args)
+    registry = _load_registry(args, {"maniqa"} | ({"q_realign"} if args.qrealign else set()) | settings.model_keys())
     try:
         doc = make_sample(folders, args.out, n=args.n, seed=args.seed, models=registry, cache_db=args.db,
-                          cache_dir=args.cache, workers=args.workers, library=library, qrealign=args.qrealign)
+                          cache_dir=args.cache, workers=args.workers, library=library, qrealign=args.qrealign,
+                          settings=settings, population=args.population)
     except (ValueError, FileNotFoundError) as exc:
         raise SystemExit(f"ai-culler: {exc}") from exc
     for w in doc["warnings"]:
         print(f"warning: {w}", file=sys.stderr)
     for folder, k in doc["per_folder"].items():
         print(f"{folder}: {k} of {doc['candidates_per_folder'][folder]} competing frames")
+    if doc["per_role"]:
+        print("by role: " + ", ".join(f"{r} {k}" for r, k in doc["per_role"].items()))
     if doc["per_category"]:
         print("by category: " + ", ".join(f"{c} {k}" for c, k in sorted(doc["per_category"].items(), key=lambda x: -x[1])))
     print(f"{doc['drawn']} frames -> {args.out / 'label.html'} (open it, label every frame, export labels.csv into {args.out})")
@@ -1457,6 +1461,10 @@ def build_parser() -> argparse.ArgumentParser:
     sample_cmd.add_argument("--models", default="auto", help="Where the app's models are (as for cull); MANIQA scores the sample")
     sample_cmd.add_argument("--device", default="auto")
     sample_cmd.add_argument("--workers", type=int)
+    sample_cmd.add_argument("--settings", type=Path, help="Your cull settings: the would-be keeps are what this cull keeps (floor off)")
+    sample_cmd.add_argument("--population", choices=["keepers", "all"], default="keepers",
+                            help="keepers (default): what a quality floor would judge, i.e. would-be keeps and each set's runner-up; "
+                            "all: every competing frame")
     sample_cmd.add_argument("--qrealign", action="store_true", help="Also score the sample with Q-ReAlign (quality and aesthetics)")
     sample_cmd.add_argument("--baseline", type=Path, help="Library baseline (ai-culler baseline): spread the draw evenly across categories")
     sample_cmd.set_defaults(func=command_sample)

@@ -232,3 +232,18 @@ def test_hero_counts_as_keep(tmp_path):
     p = tmp_path / "labels.csv"
     p.write_text("id,name,label\n001,x,hero\n002,y,reject\n")
     assert read_labels(p) == {"001": "keep", "002": "reject"}
+
+
+def test_sample_draws_would_be_keeps_and_runners_up_with_roles(tmp_path):
+    from aiculler import CullSettings
+
+    root = tmp_path / "shoot"
+    frames = [Frame(f"B{i}", 0.1 * i, 0, marker=10 * (i + 1)) for i in range(5)]  # a burst
+    frames += [Frame("L", 700.0, 3, marker=200)]  # a lone frame
+    write_shoot(root, frames)
+    doc = make_sample([root], tmp_path / "out", n=20, seed=1, cache_db=tmp_path / "c.sqlite", settings=CullSettings(bursts_keep=1))
+    roles = sorted(r["role"] for r in doc["rows"])
+    assert roles == ["burst_winner", "lone", "runner_up"]  # burst losers beyond the runner-up are not drawn
+    assert doc["population"] == "keepers" and doc["per_role"] == {"burst_winner": 1, "lone": 1, "runner_up": 1}
+    every = make_sample([root], tmp_path / "out2", n=20, seed=1, cache_db=tmp_path / "c.sqlite", population="all")
+    assert every["drawn"] == 6 and all(r["role"] is None for r in every["rows"])

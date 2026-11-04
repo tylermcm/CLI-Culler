@@ -40,6 +40,7 @@ class SampleRow:
     capture: str
     kind: str  # group kind (single, burst, ...)
     scores: dict[str, float] = field(default_factory=dict)
+    role: str | None = None  # what the floor would judge it as (api.FLOOR_ROLES), with population "keepers"
     labels: list[str] = field(default_factory=list)  # TinyCLIP categories (with a library baseline)
     techniques: list[str] = field(default_factory=list)  # EXIF technique flags (with a library baseline)
 
@@ -78,12 +79,20 @@ def make_sample(
     progress=None,
     library: "LibraryBaseline | None" = None,
     qrealign: bool = False,
+    population: str = "keepers",
 ) -> dict:
     """Draw, score and write the labelling page. Returns the sample document (also ``out/sample.json``).
 
+    ``population``: "keepers" (default) draws from the frames a quality floor would judge: each shoot is culled with
+    ``settings`` (and ``models`` when they ask for any) with the floor off, and its would-be keeps (lone frames,
+    burst and scene winners and survivors) and each set's runner-up are drawn, each row recording its role; "all"
+    draws from every competing frame, kept or not.
+
     With a ``library`` baseline the draw is spread evenly across categories (each frame's most likely one) instead of
     folders, only frames the library holds are drawn, and each row carries its categories and technique flags."""
-    from aiculler.api import CullSettings, floor_applies
+    from dataclasses import replace
+
+    from aiculler.api import CullSettings, cull, floor_applies, floor_population
     from aiculler.ingest import PreviewCache, ingest
     from aiculler.routing import route
     from aiculler.scorers import ScoreStore, default_scorers, run_scorers
@@ -96,13 +105,24 @@ def make_sample(
         cache_dir = Path(str(Path(cache_db).with_suffix("")) + "_previews") if cache_db else Path(".aiculler_cache")
     previews = PreviewCache(cache_dir)
     cache = ScoreCache(cache_db) if cache_db else ScoreCache(":memory:")
-    shoots, candidates = {}, {}
+    if population not in ("keepers", "all"):
+        raise ValueError(f"population must be keepers or all; got {population!r}")
+    shoots, candidates, roles = {}, {}, {}
+    no_floor = replace(settings, gates=replace(settings.gates, quality_reject=0.0, quality_review=0.0, qra_reject=0.0, qra_review=0.0))
     for folder in folders:
-        shoot = ingest(folder, backend=settings.backend, exclude=settings.exclude, workers=workers)
-        routing = route(shoot, settings)
         key = str(folder)
+        if population == "keepers":
+            result = cull(folder, no_floor, models=models if no_floor.model_keys() else None, cache_db=cache_db,
+                          cache_dir=cache_dir, workers=workers)
+            shoot = result.shoot
+            roles[key] = floor_population(shoot, result.files, no_floor)
+            candidates[key] = [c for c in roles[key] if not shoot.captures[c].error]
+        else:
+            shoot = ingest(folder, backend=settings.backend, exclude=settings.exclude, workers=workers)
+            routing = route(shoot, settings)
+            roles[key] = {}
+            candidates[key] = [c for c in routing.scored_captures() if floor_applies(shoot, routing, c) and not shoot.captures[c].error]
         shoots[key] = shoot
-        candidates[key] = [c for c in routing.scored_captures() if floor_applies(shoot, routing, c) and not shoot.captures[c].error]
     records: dict[tuple[str, str], dict] = {}
     if library is not None:
         records = {(r["shoot"], r["capture"]): r for r in library.doc["records"]}
@@ -146,7 +166,8 @@ def make_sample(
                 warnings.append("q_realign: not used (not available)")
             for cid in ids:
                 cap = shoot.captures[cid]
-                row = SampleRow("", key, cap.primary, cid, shoot.group_of(cid).kind, dict(store.scores.get(cid, {})))
+                row = SampleRow("", key, cap.primary, cid, shoot.group_of(cid).kind, dict(store.scores.get(cid, {})),
+                                role=roles[key].get(cid))
                 rec = records.get((key, cid))
                 if rec is not None:
                     row.labels, row.techniques = list(rec["labels"]), list(rec["techniques"])
@@ -179,6 +200,8 @@ def make_sample(
         "drawn": len(rows),
         "per_folder": {k: len(v) for k, v in picked.items()},
         "per_category": per_category,
+        "population": population,
+        "per_role": {r: sum(1 for row in rows if row.role == r) for r in sorted({row.role for row in rows if row.role})},
         "candidates_per_folder": {k: len(v) for k, v in candidates.items()},
         "maniqa": maniqa_revision,
         "warnings": warnings,
