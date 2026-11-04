@@ -147,3 +147,56 @@ junk (two accidental motion streaks MANIQA scores 0.28, an out-of-focus shot of 
 frames only MANIQA flagged are mostly good (a smiling portrait Q-ReAlign rates 0.84, the Giant Buddha, a portrait
 in a park at 0.91, a street scene). On lone frames Q-ReAlign quality looks like the better junk detector; the
 labelled baseline (judged frame by frame, would-be keeps) is what should decide it.
+
+## Models in ranking, scene refinement, people (four shoots)
+
+Each variant culled the four review shoots. Scored against the exported picks of China (18) and Alaska (20) and
+ImageTriage's decisions on China (29 keeps); Japan and WhiteSands have no picks, so only their keep rates count.
+`appeal` = Q-ReAlign aesthetics in ranking; `rank` = faces + MANIQA + Q-ReAlign; `scenes` = TinyCLIP scene
+refinement (`refine_scenes`); `people` = faces + AdaFace people coverage, with the person filter below.
+
+| Variant | China picks | China ImageTriage keeps (precision) | Alaska picks | Keep rate China / Alaska / Japan / WhiteSands |
+|---|---|---|---|---|
+| core (no models) | 12 / 18 | 20 / 29 (0.175) | 15 / 20 | 0.429 / 0.566 / 0.819 / 0.504 |
+| appeal | 11 | 18 (0.161) | 17 | 0.425 / 0.563 / 0.823 / 0.504 |
+| rank | 12 | 19 (0.168) | 17 | 0.427 / 0.566 / 0.823 / 0.502 |
+| scenes | **13** | 21 (**0.204**) | 15 | **0.416 / 0.489 / 0.802 / 0.457** |
+| people | **13** | **22** (0.186) | 15 | 0.433 / 0.566 / 0.819 / 0.504 |
+
+**Scene refinement is the clear gain**: fewer frames kept on every shoot (Alaska 57% → 49%, WhiteSands 50% → 46%)
+with no pick lost, one more pick and ImageTriage keep found on China, and the best precision against ImageTriage. It
+needs TinyCLIP, which `search` and `people` run anyway.
+
+**Q-ReAlign aesthetics in ranking is a wash**: two more picks on Alaska, one fewer on China and two fewer
+ImageTriage keeps. With about 20 picks per shoot a difference of one or two frames is noise; it does not earn its
+GPU time as a default. Leave it opt-in.
+
+**People** finds one more China pick and the most ImageTriage keeps (faces in ranking plus one coverage promotion).
+
+### People: the app's person filter
+
+The people search looks at a frame whole and in 50 overlapping tiles, then runs AdaFace on each face: about 0.45 s
+per frame on one core. It first ran on every readable frame. The app runs it only on frames its TinyCLIP person
+pre-filter flags (`face_index.plan_face_index`), now ported unchanged, and frames run on 8 threads.
+
+| Shoot | Frames searched (filter) | Faces / people, every frame | Faces / people, filtered |
+|---|---|---|---|
+| China | 560 of 1,137 (49%) | 528 / 27 | 466 / 25 |
+| Alaska | 144 of 2,707 (5%) | 100 / 14 | 4 / 1 |
+| Japan | 95 of 531 (18%) | 17 / 7 | 1 / 1 |
+| WhiteSands | 67 of 917 (7%) | (stopped) | 31 / 4 |
+
+Contact sheets of every face the filter dropped: on China the dog (19 frames as one "person"), the golden
+Samantabhadra statue, the Giant Buddha, clouds, a roof, a sign; on Alaska every one of the 14 "people" was bears, an
+eagle, rocks, a backpack, a couch, the aurora; on Japan blossoms, trees, signs and one real bystander at 0.3% of the
+frame (too small for people coverage, which counts faces from 1%). So the filter costs almost nothing in recall
+and removes nearly all the false people. Picks and ImageTriage results are identical with and without it.
+
+What remains: a few animal faces pass the filter's animal check (Alaska's 4 faces are a deer, a bear and an eagle;
+Japan's 1 is a stone monument); faces of statues in frames that also show people stay (China); and one person can
+split into two clusters across lighting (WhiteSands: the same woman as #1 and #4). The last is the app's clustering
+threshold (0.35).
+
+Time, Alaska culled from scratch with `--with people` (2,707 captures, new database, previews cached): 4.7 minutes in
+all; faces 55 s of it (people search on 149 frames 22 s, the whole-frame blink pass on 681 other contested frames
+33 s), TinyCLIP 75 s, cheap scores 67 s, ingest 59 s. Before the filter, the face search alone took 35 minutes.

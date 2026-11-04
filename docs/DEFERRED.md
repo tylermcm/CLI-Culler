@@ -70,3 +70,14 @@ Each has a regression test or a measurement to re-check against.
   in the bottom 0–2% of a shoot that is almost all wildlife, so even a per-category percentile ranks them last.
 - **Options after the baseline:** category-relative percentiles (TinyCLIP zero-shot categories, EXIF technique
   flags), compared against a single global level on the labels; or MANIQA sends frames to review only, never rejects.
+
+## 6. TinyCLIP embeddings differ a little with the database's history: **open, minor**
+
+Alaska culled into a new database (previews already cached) gave the same TinyCLIP embedding as the shared database for
+the 1,006 scored candidates, but slightly different ones for the other 1,695 frames (cosine 0.991–1.0). Five frames
+near the person filter's threshold flipped (149 searched against 144); the people found were identical. The embedding
+is computed once per frame and cached, so a database is consistent with itself; only a fresh database disagrees.
+The cause is not pinned down: TinyCLIP embeds the 1,024 px preview, which is the fresh decode on the first load and
+the cache's JPEG (quality 92) afterwards, but re-encoding explains only part of the difference on the frames checked.
+Worth a look before comparing scores across databases (the library baseline is built in the shared one).
+
