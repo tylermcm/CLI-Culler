@@ -1,6 +1,6 @@
 """Preference learning on TinyCLIP embeddings (milestone 4).
 
-The same model as ``PreferenceLearningScorer`` (IncrementalPCA -> StandardScaler -> logistic SGD, alpha 1e-4,
+The original cli-culler preference model (IncrementalPCA -> StandardScaler -> logistic SGD, alpha 1e-4,
 random_state 13) and its leave-one-out diagnostics, trained on TinyCLIP image embeddings with labels from your
 past culls (any ``evaluate`` truth source: picks, csv, triage, ...). Classes are balanced, since final picks are
 a few percent of a shoot. ``score`` gives the probability you keep a frame; ``decide`` uses it as one more
@@ -13,8 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-
-from aiculler.preference_learning import FeedbackExample, leave_one_out_scores
 
 ALPHA = 0.0001
 RANDOM_STATE = 13
@@ -80,9 +78,7 @@ def _diagnostics(projected: np.ndarray, y: np.ndarray) -> dict:
     n = len(y)
     held: dict[int, float] = {}
     if n <= 300:
-        examples = [FeedbackExample(i, int(y[i]), "", "") for i in range(n)]
-        held = leave_one_out_scores(examples=examples, projected_all=projected, all_ids=list(range(n)), labels=y,
-                                    alpha=ALPHA, random_state=RANDOM_STATE)
+        held = _leave_one_out(projected, y)
         method = "leave-one-out"
     else:
         rng = np.random.default_rng(RANDOM_STATE)
@@ -175,3 +171,22 @@ def learn_preference(
         registry.close()
     model = train(np.asarray(xs, dtype=np.float32), np.asarray(ys), embedding_revision=scorer.revision)
     return model, summary
+
+
+def _leave_one_out(projected: np.ndarray, y: np.ndarray) -> dict[int, float]:
+    """{example: decision score} with each example held out of its own training (the original routine: no class
+    balancing; skipped below 3 examples or when a fold has one class)."""
+    from sklearn.linear_model import SGDClassifier
+
+    n = len(y)
+    scores: dict[int, float] = {}
+    if n < 3:
+        return scores
+    for i in range(n):
+        train = np.arange(n) != i
+        if len(set(y[train].tolist())) < 2:
+            continue
+        clf = SGDClassifier(loss="log_loss", penalty="l2", alpha=ALPHA, max_iter=1000, tol=1e-3, random_state=RANDOM_STATE)
+        clf.fit(projected[train], y[train])
+        scores[i] = float(clf.decision_function(projected[[i]]).reshape(-1)[0])
+    return scores

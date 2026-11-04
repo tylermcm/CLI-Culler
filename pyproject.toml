@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-culler"
-version = "0.2.0.dev1"
-description = "Headless offline CLI image culling engine with GUI-ready callbacks"
+version = "0.3.0.dev1"
+description = "Headless offline photo culling engine for ImageTriage"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

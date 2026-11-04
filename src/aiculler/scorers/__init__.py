@@ -111,20 +111,3 @@ def run_scorers(
                 store.add(cid, res)
             done += len(ids)
             progress(scorer.name, done, total)
-
-
-def score_captures(
-    shoot: Shoot,
-    capture_ids: list[str],
-    previews: PreviewCache,
-    cache,
-    progress: Callable[[str, int, int], None] | None = None,
-    scorers: list[Scorer] | None = None,
-    batch_size: int = 32,
-    workers: int | None = None,
-) -> tuple[dict[str, dict[str, float]], dict[str, int]]:
-    """Cheap scorers only: {capture: {metric: value}} and stats (kept for callers of the milestone-1 API)."""
-    store = ScoreStore(scores={cid: {} for cid in capture_ids})
-    run_scorers(store, shoot, capture_ids, scorers if scorers is not None else default_scorers(), previews, cache, progress, batch_size, workers)
-    store.stats["scored_captures"] = len(capture_ids)
-    return store.scores, store.stats

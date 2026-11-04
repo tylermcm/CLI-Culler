@@ -1,7 +1,0 @@
-tag,metric,direction,threshold,weight,k
-blownout,highlight_clip_ratio,higher_is_worse,0.015,1.0,80
-harshlight,harsh_light_score,higher_is_worse,0.35,0.9,12
-underexposed,shadow_clip_ratio,higher_is_worse,0.12,0.8,25
-lowcontrast,contrast_score,lower_is_worse,0.22,0.6,14
-outoffocus,focus_score,lower_is_worse,0.30,0.9,16
-motionblur,motion_blur_score,higher_is_worse,0.20,0.7,14

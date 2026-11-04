@@ -76,7 +76,7 @@ def test_cli_cull_and_evaluate(shoot, tmp_path):
     settings.write_text(json.dumps({"bursts_keep": 1}))
     out = tmp_path / "decisions.json"
     db = tmp_path / "c.sqlite"
-    assert main(["--no-log", "--db", str(db), "cull", str(shoot), "--settings", str(settings), "--out", str(out), "--quiet"]) == 0
+    assert main(["--db", str(db), "cull", str(shoot), "--settings", str(settings), "--out", str(out), "--quiet"]) == 0
     doc = load_decisions(out)
     assert doc["schema"] == "aiculler-decisions/1"
     assert doc["settings"]["bursts_keep"] == 1
@@ -88,7 +88,7 @@ def test_cli_cull_and_evaluate(shoot, tmp_path):
     report = tmp_path / "report.md"
     metrics = tmp_path / "metrics.json"
     assert main([
-        "--no-log", "--db", str(db), "evaluate", str(shoot), "--truth", "xmp",
+        "--db", str(db), "evaluate", str(shoot), "--truth", "xmp",
         "--decisions", str(out), "--out", str(report), "--metrics-out", str(metrics),
     ]) == 0
     text = report.read_text()
@@ -108,7 +108,7 @@ def test_evaluate_picks_end_to_end(tmp_path):
     report = tmp_path / "report.md"
     metrics = tmp_path / "metrics.json"
     assert main([
-        "--no-log", "--db", str(tmp_path / "c.sqlite"), "evaluate", str(shoot), str(winners), "--quiet",
+        "--db", str(tmp_path / "c.sqlite"), "evaluate", str(shoot), str(winners), "--quiet",
         "--decisions", str(tmp_path / "decisions.json"), "--out", str(report), "--metrics-out", str(metrics),
     ]) == 0  # --truth picks is the default
     m = json.loads(metrics.read_text())
@@ -122,15 +122,15 @@ def test_cli_expands_quoted_tilde_and_rejects_missing_or_empty_folders(shoot, tm
     monkeypatch.setenv("HOME", str(shoot.parent))
     out = tmp_path / "d.json"
     db = str(tmp_path / "c.sqlite")
-    assert main(["--no-log", "--db", db, "cull", "~/shoot", "--out", str(out), "--quiet"]) == 0  # as if quoted: "~/shoot"
+    assert main(["--db", db, "cull", "~/shoot", "--out", str(out), "--quiet"]) == 0  # as if quoted: "~/shoot"
     assert load_decisions(out)["summary"]["files"] == 12
 
     with pytest.raises(SystemExit, match="shoot folder not found: .*nope"):
-        main(["--no-log", "--db", db, "cull", "~/nope", "--out", str(tmp_path / "x.json"), "--quiet"])
+        main(["--db", db, "cull", "~/nope", "--out", str(tmp_path / "x.json"), "--quiet"])
     empty = tmp_path / "empty"
     empty.mkdir()
     with pytest.raises(SystemExit, match="no image files found"):
-        main(["--no-log", "--db", db, "cull", str(empty), "--out", str(tmp_path / "y.json"), "--quiet"])
+        main(["--db", db, "cull", str(empty), "--out", str(tmp_path / "y.json"), "--quiet"])
     assert not (tmp_path / "x.json").exists() and not (tmp_path / "y.json").exists()
 
 
@@ -148,7 +148,7 @@ def test_gated_pick_is_reported_with_its_margins(tmp_path):
         shutil.copy2(paths[name], winners / f"{name}.JPG")
     report, metrics = tmp_path / "report.md", tmp_path / "metrics.json"
     assert main([
-        "--no-log", "--db", str(tmp_path / "c.sqlite"), "evaluate", str(shoot), "--quiet",
+        "--db", str(tmp_path / "c.sqlite"), "evaluate", str(shoot), "--quiet",
         "--out", str(report), "--metrics-out", str(metrics),
     ]) == 0
     g = json.loads(metrics.read_text())["gates_vs_kept"]
@@ -163,7 +163,7 @@ def test_gated_pick_is_reported_with_its_margins(tmp_path):
     settings = tmp_path / "s.json"
     settings.write_text(json.dumps({"gates": {"sky_blown": 1.01, "clip_region_reject": 0.5}}))
     assert main([
-        "--no-log", "--db", str(tmp_path / "c.sqlite"), "evaluate", str(shoot), "--quiet", "--settings", str(settings),
+        "--db", str(tmp_path / "c.sqlite"), "evaluate", str(shoot), "--quiet", "--settings", str(settings),
         "--metrics-out", str(metrics), "--out", str(report),
     ]) == 0
     assert json.loads(metrics.read_text())["gates_vs_kept"]["gated"] == []

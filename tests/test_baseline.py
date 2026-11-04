@@ -52,7 +52,7 @@ def test_sample_then_calibrate(tmp_path):
 
     from aiculler.cli import main
 
-    assert main(["--no-log", "calibrate", str(out), "--out", str(tmp_path / "cal.md")]) == 0
+    assert main(["calibrate", str(out), "--out", str(tmp_path / "cal.md")]) == 0
     assert "quality_reject" in (tmp_path / "cal.md").read_text()
     json.loads((out / "sample.json").read_text())
 

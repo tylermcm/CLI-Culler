@@ -238,7 +238,7 @@ def test_cli_cull_with_models_flag_reports_what_was_used(shoot, tmp_path, fake_a
     from aiculler.cli import main
 
     out = tmp_path / "d.json"
-    assert main(["--no-log", "--db", str(tmp_path / "c.sqlite"), "cull", str(shoot), "--quiet", "--out", str(out),
+    assert main(["--db", str(tmp_path / "c.sqlite"), "cull", str(shoot), "--quiet", "--out", str(out),
                  "--models", str(fake_app), "--with", "maniqa,appeal"]) == 0
     doc = json.loads(out.read_text())
     err = capsys.readouterr().err
@@ -248,11 +248,11 @@ def test_cli_cull_with_models_flag_reports_what_was_used(shoot, tmp_path, fake_a
     assert doc["settings"]["models"] == ["maniqa", "appeal"]
 
     # Without --with, the app is never read: no model problems reported, no warnings.
-    assert main(["--no-log", "--db", str(tmp_path / "c.sqlite"), "cull", str(shoot), "--quiet", "--out", str(out),
+    assert main(["--db", str(tmp_path / "c.sqlite"), "cull", str(shoot), "--quiet", "--out", str(out),
                  "--models", str(fake_app)]) == 0
     assert "not available" not in capsys.readouterr().err and json.loads(out.read_text())["warnings"] == []
     with pytest.raises(SystemExit, match="models must be one of"):
-        main(["--no-log", "--db", str(tmp_path / "c.sqlite"), "cull", str(shoot), "--quiet", "--with", "clip"])
+        main(["--db", str(tmp_path / "c.sqlite"), "cull", str(shoot), "--quiet", "--with", "clip"])
 
 
 def test_learn_trains_on_picks_from_past_shoots(tmp_path):
